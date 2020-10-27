@@ -17,13 +17,29 @@
   ~ along with Amahi. If not, see <http ://www.gnu.org/licenses/>.
   -->
 
-<TextView xmlns:android="http://schemas.android.com/apk/res/android"
-    android:id="@+id/text_share_title"
+
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
-    android:layout_height="?android:attr/listPreferredItemHeight"
-    android:background="?android:attr/activatedBackgroundIndicator"
-    android:foreground="?android:attr/selectableItemBackgroundBorderless"
+    xmlns:tools="http://schemas.android.com/tools"
     android:gravity="center_vertical"
-    android:maxLines="1"
-    android:padding="16dp"
-    android:textSize="@dimen/text_medium" />
+    android:background="?android:attr/activatedBackgroundIndicator"
+    android:id="@+id/offline_files_layout"
+    android:layout_height="48dp">
+
+    <ImageView
+        android:id="@+id/nav_icon"
+        android:layout_width="24dp"
+        android:layout_height="24dp"
+        android:layout_marginEnd="32dp"
+        android:layout_marginStart="16dp"
+        android:src="@drawable/ic_shares_white"
+        tools:ignore="contentDescription" />
+
+    <TextView
+        android:id="@+id/nav_name"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        tools:text="Navigation Menu"
+        android:textSize="@dimen/text_small"
+        android:textStyle="bold" />
+</LinearLayout>

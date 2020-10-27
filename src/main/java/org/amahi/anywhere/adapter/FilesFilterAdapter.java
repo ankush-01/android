@@ -21,14 +21,10 @@ package org.amahi.anywhere.adapter;
 
 import android.content.Context;
 import android.graphics.Color;
-import android.media.MediaMetadataRetriever;
 import android.net.Uri;
-import android.os.AsyncTask;
+import android.support.v7.widget.RecyclerView;
 import android.text.style.ForegroundColorSpan;
 import android.view.LayoutInflater;
-import android.view.View;
-import android.view.ViewGroup;
-import android.widget.BaseAdapter;
 import android.widget.Filter;
 import android.widget.Filterable;
 import android.widget.ImageView;
@@ -36,14 +32,15 @@ import android.widget.ImageView;
 import com.bumptech.glide.Glide;
 import com.bumptech.glide.load.engine.DiskCacheStrategy;
 
-import org.amahi.anywhere.R;
 import org.amahi.anywhere.server.client.ServerClient;
 import org.amahi.anywhere.server.model.ServerFile;
 import org.amahi.anywhere.server.model.ServerShare;
+import org.amahi.anywhere.util.Downloader;
 import org.amahi.anywhere.util.Mimes;
+import org.amahi.anywhere.util.ServerFileClickListener;
 
+import java.io.File;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
 
 /**
@@ -51,11 +48,12 @@ import java.util.List;
  * for the {@link ServerFilesAdapter}
  * and the {@link ServerFilesMetadataAdapter}.
  */
-public abstract class FilesFilterBaseAdapter extends BaseAdapter implements Filterable {
-
+public abstract class FilesFilterAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> implements Filterable {
 
     static final ForegroundColorSpan fcs = new ForegroundColorSpan(Color.parseColor("#be5e00"));
     static String queryString;
+    protected ServerFileClickListener mListener;
+    protected int selectedPosition = RecyclerView.NO_POSITION;
     LayoutInflater layoutInflater;
     ServerClient serverClient;
     ServerShare serverShare;
@@ -63,21 +61,21 @@ public abstract class FilesFilterBaseAdapter extends BaseAdapter implements Filt
     List<ServerFile> filteredFiles;
     private FilesFilter filesFilter;
     private onFilterListChange onFilterListChange;
-
-    abstract void bindView(ServerFile file, View view);
-
-    abstract View newView(ViewGroup container);
+    private AdapterMode adapterMode = AdapterMode.SERVER;
 
     public <T extends onFilterListChange> void setFilterListChangeListener(T t) {
         this.onFilterListChange = t;
     }
 
-    @Override
-    public int getCount() {
-        return filteredFiles.size();
+    public void setOnClickListener(ServerFileClickListener mListener) {
+        this.mListener = mListener;
     }
 
     @Override
+    public int getItemCount() {
+        return filteredFiles.size();
+    }
+
     public ServerFile getItem(int i) {
         return filteredFiles.get(i);
     }
@@ -85,19 +83,6 @@ public abstract class FilesFilterBaseAdapter extends BaseAdapter implements Filt
     @Override
     public long getItemId(int position) {
         return position;
-    }
-
-    @Override
-    public View getView(int position, View view, ViewGroup container) {
-        ServerFile file = getItem(position);
-
-        if (view == null) {
-            view = newView(container);
-        }
-
-        bindView(file, view);
-
-        return view;
     }
 
     public void replaceWith(ServerShare serverShare, List<ServerFile> files) {
@@ -109,7 +94,9 @@ public abstract class FilesFilterBaseAdapter extends BaseAdapter implements Filt
     }
 
     public void removeFile(int position) {
-        this.files.remove(position);
+        ServerFile serverFile = filteredFiles.get(position);
+        this.filteredFiles.remove(serverFile);
+        this.files.remove(serverFile);
         notifyDataSetChanged();
     }
 
@@ -126,16 +113,54 @@ public abstract class FilesFilterBaseAdapter extends BaseAdapter implements Filt
     }
 
     void setUpImageIcon(ServerFile file, ImageView fileIconView) {
-        Glide.with(fileIconView.getContext())
-            .load(getImageUri(file))
-            .diskCacheStrategy(DiskCacheStrategy.ALL)
-            .centerCrop()
-            .placeholder(Mimes.getFileIcon(file))
-            .into(fileIconView);
+        if (adapterMode == AdapterMode.OFFLINE) {
+            Glide
+                .with(fileIconView.getContext())
+                .load(getOfflineFilePath(file.getName(), fileIconView.getContext()))
+                .diskCacheStrategy(DiskCacheStrategy.ALL)
+                .centerCrop()
+                .placeholder(Mimes.getFileIcon(file))
+                .into(fileIconView);
+        } else {
+            Glide.with(fileIconView.getContext())
+                .load(getImageUri(file))
+                .diskCacheStrategy(DiskCacheStrategy.ALL)
+                .centerCrop()
+                .placeholder(Mimes.getFileIcon(file))
+                .into(fileIconView);
+        }
+    }
+
+    private File getOfflineFilePath(String name, Context context) {
+        return new File(context.getFilesDir() + "/" + Downloader.OFFLINE_PATH + "/" + name);
     }
 
     private Uri getImageUri(ServerFile file) {
         return serverClient.getFileUri(serverShare, file);
+    }
+
+    public boolean isEmpty() {
+        return (filteredFiles.isEmpty());
+    }
+
+    public int getSelectedPosition() {
+        return selectedPosition;
+    }
+
+    public void setSelectedPosition(int position) {
+        this.selectedPosition = position;
+    }
+
+    public AdapterMode getAdapterMode() {
+        return adapterMode;
+    }
+
+    public void setAdapterMode(AdapterMode adapterMode) {
+        this.adapterMode = adapterMode;
+    }
+
+    public static enum AdapterMode {
+        SERVER, OFFLINE
     }
 
     public interface onFilterListChange {
@@ -174,45 +199,4 @@ public abstract class FilesFilterBaseAdapter extends BaseAdapter implements Filt
         }
     }
 
-    class AlbumArtFetcher extends AsyncTask<Void, Void, byte[]> {
-        private final ImageView imageView;
-        private final Uri audioUri;
-        private final Context applicationContext;
-
-        AlbumArtFetcher(ImageView imageView, Uri audioUri, Context applicationContext) {
-            this.imageView = imageView;
-            this.audioUri = audioUri;
-            this.applicationContext = applicationContext;
-        }
-
-        @Override
-        protected byte[] doInBackground(Void... params) {
-            try {
-                MediaMetadataRetriever audioMetadataRetriever = new MediaMetadataRetriever();
-                audioMetadataRetriever.setDataSource(audioUri.toString(), new HashMap<String, String>());
-                return extractAlbumArt(audioMetadataRetriever);
-            } catch (Exception e) {
-                e.printStackTrace();
-                return null;
-            }
-        }
-
-        private byte[] extractAlbumArt(MediaMetadataRetriever audioMetadataRetriever) {
-            return audioMetadataRetriever.getEmbeddedPicture();
-        }
-
-        @Override
-        protected void onPostExecute(byte[] bitmap) {
-            if (bitmap != null) {
-                Glide.with(applicationContext)
-                    .load(bitmap)
-                    .asBitmap()
-                    .diskCacheStrategy(DiskCacheStrategy.ALL)
-                    .centerCrop()
-                    .placeholder(R.drawable.ic_file_audio)
-                    .error(R.drawable.ic_file_audio)
-                    .into(imageView);
-            }
-        }
-    }
 }

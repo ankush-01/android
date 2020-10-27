@@ -20,33 +20,37 @@
 package org.amahi.anywhere.fragment;
 
 import android.Manifest;
+import android.app.DownloadManager;
 import android.app.ProgressDialog;
 import android.app.SearchManager;
 import android.content.Context;
-import android.content.DialogInterface;
+import android.content.Intent;
+import android.content.res.Configuration;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Parcelable;
+import android.support.annotation.IntDef;
 import android.support.annotation.NonNull;
 import android.support.annotation.RequiresApi;
 import android.support.design.widget.Snackbar;
 import android.support.v4.app.Fragment;
 import android.support.v4.widget.SwipeRefreshLayout;
 import android.support.v7.app.AlertDialog;
+import android.support.v7.widget.DividerItemDecoration;
+import android.support.v7.widget.GridLayoutManager;
+import android.support.v7.widget.LinearLayoutManager;
+import android.support.v7.widget.RecyclerView;
 import android.support.v7.widget.SearchView;
-import android.view.ActionMode;
+import android.util.DisplayMetrics;
 import android.view.LayoutInflater;
 import android.view.Menu;
 import android.view.MenuInflater;
 import android.view.MenuItem;
 import android.view.View;
 import android.view.ViewGroup;
-import android.widget.AbsListView;
-import android.widget.AdapterView;
 import android.widget.AutoCompleteTextView;
 import android.widget.LinearLayout;
-import android.widget.ListAdapter;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -60,23 +64,35 @@ import com.squareup.otto.Subscribe;
 import org.amahi.anywhere.AmahiApplication;
 import org.amahi.anywhere.R;
 import org.amahi.anywhere.activity.ServerFilesActivity;
-import org.amahi.anywhere.adapter.FilesFilterBaseAdapter;
+import org.amahi.anywhere.adapter.FilesFilterAdapter;
 import org.amahi.anywhere.adapter.ServerFilesAdapter;
 import org.amahi.anywhere.adapter.ServerFilesMetadataAdapter;
 import org.amahi.anywhere.bus.BusProvider;
 import org.amahi.anywhere.bus.FileOpeningEvent;
+import org.amahi.anywhere.bus.FileOptionClickEvent;
+import org.amahi.anywhere.bus.OfflineCanceledEvent;
+import org.amahi.anywhere.bus.OfflineFileDeleteEvent;
 import org.amahi.anywhere.bus.ServerFileDeleteEvent;
+import org.amahi.anywhere.bus.ServerFileDownloadingEvent;
 import org.amahi.anywhere.bus.ServerFileSharingEvent;
 import org.amahi.anywhere.bus.ServerFilesLoadFailedEvent;
 import org.amahi.anywhere.bus.ServerFilesLoadedEvent;
+import org.amahi.anywhere.db.entities.OfflineFile;
+import org.amahi.anywhere.db.repositories.OfflineFileRepository;
+import org.amahi.anywhere.model.FileOption;
 import org.amahi.anywhere.server.client.ServerClient;
 import org.amahi.anywhere.server.model.ServerFile;
 import org.amahi.anywhere.server.model.ServerShare;
 import org.amahi.anywhere.util.Android;
+import org.amahi.anywhere.util.Downloader;
 import org.amahi.anywhere.util.Fragments;
+import org.amahi.anywhere.util.Intents;
 import org.amahi.anywhere.util.Mimes;
+import org.amahi.anywhere.util.Preferences;
+import org.amahi.anywhere.util.ServerFileClickListener;
 import org.amahi.anywhere.util.ViewDirector;
 
+import java.io.File;
 import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -94,14 +110,16 @@ import pub.devrel.easypermissions.EasyPermissions;
 
 public class ServerFilesFragment extends Fragment implements
     SwipeRefreshLayout.OnRefreshListener,
-    AdapterView.OnItemClickListener,
-    AdapterView.OnItemLongClickListener,
-    ActionMode.Callback,
+    ServerFileClickListener,
     SearchView.OnQueryTextListener,
-    FilesFilterBaseAdapter.onFilterListChange,
+    FilesFilterAdapter.onFilterListChange,
     EasyPermissions.PermissionCallbacks,
     CastStateListener {
-    private static final int SHARE_PERMISSIONS = 101;
+    public final static int EXTERNAL_STORAGE_PERMISSION = 101;
+
+    public static final int SORT_MODIFICATION_TIME = 0;
+    public static final int SORT_NAME = 1;
+
     @Inject
     ServerClient serverClient;
     private SearchView searchView;
@@ -112,9 +130,14 @@ public class ServerFilesFragment extends Fragment implements
     private MenuItem mediaRouteMenuItem;
     private ProgressDialog deleteProgressDialog;
     private int deleteFilePosition;
-    private int lastCheckedFileIndex = -1;
-    private FilesSort filesSort = FilesSort.MODIFICATION_TIME;
-    private ActionMode filesActions;
+    private int lastSelectedFilePosition = -1;
+
+    @Types
+    private int filesSort = SORT_MODIFICATION_TIME;
+
+    private OfflineFileRepository mOfflineFileRepo;
+    private @FileOption.Types
+    int selectedFileOption;
 
     @Override
     public View onCreateView(LayoutInflater layoutInflater, ViewGroup container, Bundle savedInstanceState) {
@@ -124,7 +147,7 @@ public class ServerFilesFragment extends Fragment implements
         } else {
             rootView = layoutInflater.inflate(R.layout.fragment_server_files_metadata, container, false);
         }
-        mErrorLinearLayout = (LinearLayout) rootView.findViewById(R.id.error);
+        mErrorLinearLayout = rootView.findViewById(R.id.error);
         return rootView;
     }
 
@@ -161,33 +184,31 @@ public class ServerFilesFragment extends Fragment implements
             mIntroductoryOverlay.remove();
         }
         if ((mediaRouteMenuItem != null) && mediaRouteMenuItem.isVisible()) {
-            new Handler().post(new Runnable() {
-                @Override
-                public void run() {
-                    mIntroductoryOverlay = new IntroductoryOverlay
-                        .Builder(getActivity(), mediaRouteMenuItem)
-                        .setTitleText("Introducing Cast")
-                        .setSingleTime()
-                        .setOnOverlayDismissedListener(
-                            new IntroductoryOverlay.OnOverlayDismissedListener() {
-                                @Override
-                                public void onOverlayDismissed() {
-                                    mIntroductoryOverlay = null;
-                                }
-                            })
-                        .build();
-                    mIntroductoryOverlay.show();
-                }
+            new Handler().post(() -> {
+                mIntroductoryOverlay = new IntroductoryOverlay
+                    .Builder(getActivity(), mediaRouteMenuItem)
+                    .setTitleText("Introducing Cast")
+                    .setSingleTime()
+                    .setOnOverlayDismissedListener(
+                        () -> mIntroductoryOverlay = null)
+                    .build();
+                mIntroductoryOverlay.show();
             });
         }
     }
 
     private void setUpFiles(Bundle state) {
         setUpFilesMenu();
-        setUpFilesActions();
         setUpFilesAdapter();
+        setUpFilesActions();
+        setUpDefaults();
+        setUpOfflineFileDatabase();
         setUpFilesContent(state);
         setUpFilesContentRefreshing();
+    }
+
+    private void setUpDefaults() {
+        filesSort = Preferences.getSortOption(getContext());
     }
 
     private void setUpProgressDialog() {
@@ -202,90 +223,70 @@ public class ServerFilesFragment extends Fragment implements
     }
 
     private void setUpFilesActions() {
-        getListView().setOnItemClickListener(this);
-        getListView().setOnItemLongClickListener(this);
+        getListAdapter().setOnClickListener(this);
     }
 
-    private AbsListView getListView() {
-        return (AbsListView) getView().findViewById(android.R.id.list);
+    private RecyclerView getRecyclerView() {
+        return (RecyclerView) getView().findViewById(android.R.id.list);
     }
 
-    @Override
-    public boolean onItemLongClick(AdapterView<?> filesListView, View fileView, int filePosition, long fileId) {
-        if (!areFilesActionsAvailable()) {
-            getListView().clearChoices();
-            getListView().setItemChecked(filePosition, true);
-
-            getListView().startActionMode(this);
-
-            return true;
-        } else {
-            return false;
-        }
-    }
-
-    private boolean areFilesActionsAvailable() {
-        return filesActions != null;
-    }
-
-    @Override
-    public boolean onCreateActionMode(ActionMode actionMode, Menu menu) {
-        this.filesActions = actionMode;
-
-        actionMode.getMenuInflater().inflate(R.menu.action_mode_server_files, menu);
-
-        return true;
-    }
-
-    @Override
-    public boolean onPrepareActionMode(ActionMode actionMode, Menu menu) {
-        return false;
-    }
-
-    @Override
-    public void onDestroyActionMode(ActionMode actionMode) {
-        this.filesActions = null;
-
-        clearFileChoices();
-    }
-
-    private void clearFileChoices() {
-        getListView().clearChoices();
-        getListView().requestLayout();
-    }
-
-    @Override
-    public boolean onActionItemClicked(ActionMode actionMode, MenuItem menuItem) {
-        switch (menuItem.getItemId()) {
-            case R.id.menu_share:
+    @Subscribe
+    public void onFileOptionSelected(FileOptionClickEvent event) {
+        selectedFileOption = event.getFileOption();
+        switch (selectedFileOption) {
+            case FileOption.DOWNLOAD:
                 if (Android.isPermissionRequired()) {
-                    checkSharePermissions(actionMode);
+                    checkWritePermissions();
                 } else {
-                    startFileSharing(getCheckedFile());
-                    actionMode.finish();
+                    startFileDownloading();
                 }
                 break;
-            case R.id.menu_delete:
-                deleteFile(getCheckedFile(), actionMode);
+            case FileOption.SHARE:
+                if (Android.isPermissionRequired()) {
+                    checkWritePermissions();
+                } else {
+                    startFileSharing();
+                }
                 break;
-            default:
-                return false;
+            case FileOption.DELETE:
+                deleteFile();
+                break;
+            case FileOption.OFFLINE_ENABLED:
+                if (Android.isPermissionRequired()) {
+                    checkWritePermissions();
+                } else {
+                    changeOfflineState(true);
+                }
+                break;
+            case FileOption.OFFLINE_DISABLED:
+                changeOfflineState(false);
         }
-
-        return true;
     }
 
     @RequiresApi(api = Build.VERSION_CODES.M)
-    private void checkSharePermissions(ActionMode actionMode) {
+    private void checkWritePermissions() {
         String[] perms = {Manifest.permission.WRITE_EXTERNAL_STORAGE};
         if (EasyPermissions.hasPermissions(getContext(), perms)) {
-            startFileSharing(getCheckedFile());
+            handleFileOptionsWithPermissionGranted();
         } else {
-            lastCheckedFileIndex = getListView().getCheckedItemPosition();
+            lastSelectedFilePosition = getListAdapter().getSelectedPosition();
             EasyPermissions.requestPermissions(this, getString(R.string.share_permission),
-                SHARE_PERMISSIONS, perms);
+                EXTERNAL_STORAGE_PERMISSION, perms);
         }
-        actionMode.finish();
+    }
+
+    private void handleFileOptionsWithPermissionGranted() {
+
+        switch (selectedFileOption) {
+            case FileOption.DOWNLOAD:
+                startFileDownloading();
+                break;
+            case FileOption.SHARE:
+                startFileSharing();
+                break;
+            case FileOption.OFFLINE_ENABLED:
+                changeOfflineState(true);
+        }
     }
 
     @Override
@@ -298,71 +299,124 @@ public class ServerFilesFragment extends Fragment implements
 
     @Override
     public void onPermissionsGranted(int requestCode, List<String> perms) {
-        if (requestCode == SHARE_PERMISSIONS) {
-            if (lastCheckedFileIndex != -1) {
-                startFileSharing(getFile(lastCheckedFileIndex));
-            }
+        if (lastSelectedFilePosition != -1) {
+            handleFileOptionsWithPermissionGranted();
         }
     }
 
     @Override
     public void onPermissionsDenied(int requestCode, List<String> perms) {
         if (EasyPermissions.somePermissionPermanentlyDenied(this, perms)) {
-            if (requestCode == SHARE_PERMISSIONS) {
+            if (requestCode == EXTERNAL_STORAGE_PERMISSION) {
                 showPermissionSnackBar(getString(R.string.share_permission_denied));
             }
         }
-
     }
 
     private void showPermissionSnackBar(String message) {
         Snackbar.make(getView(), message, Snackbar.LENGTH_LONG)
-            .setAction(R.string.menu_settings, new View.OnClickListener() {
-                @Override
-                public void onClick(View v) {
-                    new AppSettingsDialog.Builder(ServerFilesFragment.this).build().show();
-                }
-            })
+            .setAction(R.string.menu_settings, v -> new AppSettingsDialog.Builder(ServerFilesFragment.this).build().show())
             .show();
     }
 
-    private void startFileSharing(ServerFile file) {
-        BusProvider.getBus().post(new ServerFileSharingEvent(getShare(), file));
+    private void startFileDownloading() {
+        BusProvider.getBus().post(new ServerFileDownloadingEvent(getShare(), getCheckedFile()));
     }
 
-    private void deleteFile(final ServerFile file, final ActionMode actionMode) {
-        deleteFilePosition = getListView().getCheckedItemPosition();
-        new AlertDialog.Builder(getContext())
-            .setTitle(R.string.message_delete_file_title)
-            .setMessage(R.string.message_delete_file_body)
-            .setPositiveButton(R.string.button_yes, new DialogInterface.OnClickListener() {
-                @Override
-                public void onClick(DialogInterface dialog, int which) {
+    private void startFileSharing() {
+        BusProvider.getBus().post(new ServerFileSharingEvent(getShare(), getCheckedFile()));
+    }
+
+    private ServerFile getOfflineServerFile(OfflineFile offlineFile) {
+        return new ServerFile(offlineFile.getName(), offlineFile.getTimeStamp(), offlineFile.getMime());
+    }
+
+    private void deleteFile() {
+        if (!isOfflineFragment()) {
+            deleteFilePosition = getListAdapter().getSelectedPosition();
+            new AlertDialog.Builder(getContext())
+                .setTitle(R.string.message_delete_file_title)
+                .setMessage(R.string.message_delete_file_body)
+                .setPositiveButton(R.string.button_yes, (dialog, which) -> {
                     deleteProgressDialog.show();
-                    serverClient.deleteFile(getShare(), file);
-                    actionMode.finish();
-                }
-            })
-            .setNegativeButton(R.string.button_no, null)
-            .show();
+                    serverClient.deleteFile(getShare(), getCheckedFile());
+                })
+                .setNegativeButton(R.string.button_no, null)
+                .show();
+        } else {
+            BusProvider.getBus().post(new OfflineFileDeleteEvent(getCheckedFile()));
+        }
+    }
+
+    private void changeOfflineState(boolean enable) {
+        if (enable) {
+            startDownloadService(getCheckedFile());
+        } else {
+            deleteFileFromOfflineStorage();
+        }
+
+        updateCurrentFileOfflineState(enable);
+    }
+
+    private void deleteFileFromOfflineStorage() {
+        OfflineFile offlineFile = mOfflineFileRepo.getOfflineFile(getCheckedFile().getName(), getCheckedFile().getModificationTime().getTime());
+        if (offlineFile != null) {
+            if (offlineFile.getState() == OfflineFile.DOWNLOADING) {
+                stopDownloading(offlineFile.getDownloadId());
+            }
+            File file = new File(getContext().getFilesDir(), Downloader.OFFLINE_PATH + "/" + getCheckedFile().getName());
+            if (file.exists()) {
+                file.delete();
+            }
+            mOfflineFileRepo.delete(offlineFile);
+            Snackbar.make(getRecyclerView(), R.string.message_offline_file_deleted, Snackbar.LENGTH_SHORT)
+                .show();
+        }
+    }
+
+    private void stopDownloading(long downloadId) {
+        DownloadManager dm = (DownloadManager) getContext().getSystemService(Context.DOWNLOAD_SERVICE);
+        if (dm != null) {
+            dm.remove(downloadId);
+            BusProvider.getBus().post(new OfflineCanceledEvent(downloadId));
+        }
+    }
+
+    private void startDownloadService(ServerFile file) {
+        Intent downloadService = Intents.Builder.with(getContext()).buildDownloadServiceIntent(file, getShare());
+        getContext().startService(downloadService);
+    }
+
+    private void updateCurrentFileOfflineState(boolean enable) {
+        ServerFile serverFile = getCheckedFile();
+        serverFile.setOffline(enable);
     }
 
     @Subscribe
     public void onFileDeleteEvent(ServerFileDeleteEvent fileDeleteEvent) {
-        deleteProgressDialog.dismiss();
+        if (deleteProgressDialog != null) {
+            deleteProgressDialog.dismiss();
+        }
         if (fileDeleteEvent.isDeleted()) {
             if (!isMetadataAvailable()) {
-                getFilesAdapter().removeFile(deleteFilePosition);
+                if (!isOfflineFragment()) {
+                    getFilesAdapter().removeFile(deleteFilePosition);
+                } else {
+                    getListAdapter().removeFile(getListAdapter().getSelectedPosition());
+                }
+                getFilesAdapter().setSelectedPosition(RecyclerView.NO_POSITION);
             } else {
                 getFilesMetadataAdapter().removeFile(deleteFilePosition);
+                getFilesMetadataAdapter().setSelectedPosition(RecyclerView.NO_POSITION);
             }
+            showFilesContent();
         } else {
             Toast.makeText(getContext(), R.string.message_delete_file_error, Toast.LENGTH_SHORT).show();
         }
     }
 
     private ServerFile getCheckedFile() {
-        return getFile(getListView().getCheckedItemPosition());
+        return getListAdapter().getItem(getListAdapter().getSelectedPosition());
     }
 
     private ServerFile getFile(int position) {
@@ -374,7 +428,7 @@ public class ServerFilesFragment extends Fragment implements
     }
 
     private boolean isMetadataAvailable() {
-        return ServerShare.Tag.MOVIES.equals(getShare().getTag());
+        return getShare() != null && ServerShare.Tag.MOVIES.equals(getShare().getTag());
     }
 
     private ServerFilesAdapter getFilesAdapter() {
@@ -385,44 +439,90 @@ public class ServerFilesFragment extends Fragment implements
         return (ServerFilesMetadataAdapter) getListAdapter();
     }
 
-    private ListAdapter getListAdapter() {
-        return getListView().getAdapter();
+    private FilesFilterAdapter getListAdapter() {
+        return (FilesFilterAdapter) getRecyclerView().getAdapter();
     }
 
-    private void setListAdapter(FilesFilterBaseAdapter adapter) {
+    private void setListAdapter(FilesFilterAdapter adapter) {
         adapter.setFilterListChangeListener(this);
-        getListView().setAdapter(adapter);
+        getRecyclerView().setAdapter(adapter);
     }
 
     private void setUpFilesAdapter() {
+        setUpRecyclerLayout();
+
         if (!isMetadataAvailable()) {
-            setListAdapter(new ServerFilesAdapter(getActivity(), getActivity().getApplicationContext(), serverClient));
+            setListAdapter(new ServerFilesAdapter(getActivity(), serverClient));
         } else {
             setListAdapter(new ServerFilesMetadataAdapter(getActivity(), serverClient));
         }
     }
 
-    private void setUpFilesContent(Bundle state) {
-        if (isFilesStateValid(state)) {
-            setUpFilesState(state);
+    private void setUpRecyclerLayout() {
+        if (!isMetadataAvailable()) {
+            getRecyclerView().setLayoutManager(new LinearLayoutManager(getActivity()));
         } else {
-            setUpFilesContent();
+            if (isLandscapeOrientation()) {
+                getRecyclerView().setLayoutManager(new GridLayoutManager(getActivity(), calculateNoOfColumns(getActivity())));
+            } else {
+                getRecyclerView().setLayoutManager(new GridLayoutManager(getActivity(), 2));
+            }
+        }
+
+        addListItemDivider();
+    }
+
+    private void addListItemDivider() {
+        DividerItemDecoration dividerItemDecoration = new DividerItemDecoration(
+            getRecyclerView().getContext(),
+            DividerItemDecoration.VERTICAL);
+
+        getRecyclerView().addItemDecoration(dividerItemDecoration);
+    }
+
+    public int calculateNoOfColumns(Context context) {
+        DisplayMetrics displayMetrics = context.getResources().getDisplayMetrics();
+        float dpWidth = displayMetrics.widthPixels / displayMetrics.density;
+        return (int) ((dpWidth - 32) / 157);
+    }
+
+    public boolean isLandscapeOrientation() {
+        int screenOrientation = getActivity().getResources().getConfiguration().orientation;
+        return screenOrientation == Configuration.ORIENTATION_LANDSCAPE;
+    }
+
+    private void setUpFilesContent(Bundle state) {
+
+        if (!isOfflineFragment()) {
+            if (isFilesStateValid(state)) {
+                setUpFilesState(state);
+            } else {
+                setUpFilesContent();
+            }
+        } else {
+            getListAdapter().setAdapterMode(FilesFilterAdapter.AdapterMode.OFFLINE);
+            getFilesAdapter().setUpDownloadReceiver();
+            showOfflineFiles();
         }
     }
 
+    private boolean isOfflineFragment() {
+        return getArguments().getBoolean(Fragments.Arguments.IS_OFFLINE_FRAGMENT);
+    }
+
     private boolean isFilesStateValid(Bundle state) {
-        return (state != null) && state.containsKey(State.FILES) && state.containsKey(State.FILES_SORT);
+        return (state != null) && state.containsKey(State.FILES);
     }
 
     private void setUpFilesState(Bundle state) {
         List<ServerFile> files = state.getParcelableArrayList(State.FILES);
 
-        FilesSort filesSort = (FilesSort) state.getSerializable(State.FILES_SORT);
-
         setUpFilesContent(files);
         setUpFilesContentSort(filesSort);
+        getListAdapter().setSelectedPosition(state.getInt(State.SELECTED_ITEM, -1));
 
         showFilesContent();
+
     }
 
     private void setUpFilesContent(List<ServerFile> files) {
@@ -434,7 +534,7 @@ public class ServerFilesFragment extends Fragment implements
     }
 
     private List<ServerFile> getMetadataFiles(List<ServerFile> files) {
-        List<ServerFile> metadataFiles = new ArrayList<ServerFile>();
+        List<ServerFile> metadataFiles = new ArrayList<>();
 
         for (ServerFile file : files) {
             if (Mimes.match(file.getMime()) == Mimes.Type.DIRECTORY) {
@@ -448,7 +548,7 @@ public class ServerFilesFragment extends Fragment implements
         return metadataFiles;
     }
 
-    private void setUpFilesContentSort(FilesSort filesSort) {
+    private void setUpFilesContentSort(@Types int filesSort) {
         this.filesSort = filesSort;
 
         getActivity().invalidateOptionsMenu();
@@ -467,11 +567,7 @@ public class ServerFilesFragment extends Fragment implements
     }
 
     private boolean areFilesAvailable() {
-        if (!isMetadataAvailable()) {
-            return !getFilesAdapter().isEmpty();
-        } else {
-            return !getFilesMetadataAdapter().isEmpty();
-        }
+        return !getListAdapter().isEmpty();
     }
 
     private void setUpFilesContent() {
@@ -500,13 +596,31 @@ public class ServerFilesFragment extends Fragment implements
         return getArguments().getParcelable(Fragments.Arguments.SERVER_SHARE);
     }
 
+    private void showOfflineFiles() {
+        List<ServerFile> serverFiles = prepareServerFilesFrom(mOfflineFileRepo.getAllOfflineFiles());
+        getListAdapter().replaceWith(null, serverFiles);
+        showFilesContent();
+        hideFilesContentRefreshing();
+    }
+
+    private List<ServerFile> prepareServerFilesFrom(List<OfflineFile> files) {
+        List<ServerFile> serverFiles = new ArrayList<>();
+
+        for (OfflineFile offlineFile : files) {
+            ServerFile serverFile = new ServerFile(offlineFile.getName(), offlineFile.getTimeStamp(), offlineFile.getMime());
+            serverFiles.add(serverFile);
+        }
+
+        return sortFiles(serverFiles);
+    }
+
     @Subscribe
     public void onFilesLoaded(ServerFilesLoadedEvent event) {
         showFilesContent(event.getServerFiles());
     }
 
     private void showFilesContent(List<ServerFile> files) {
-        setUpFilesContent(sortFiles(files));
+        setUpFilesContent(checkOfflineFiles(sortFiles(files)));
 
         showFilesContent();
 
@@ -514,7 +628,7 @@ public class ServerFilesFragment extends Fragment implements
     }
 
     private List<ServerFile> sortFiles(List<ServerFile> files) {
-        List<ServerFile> sortedFiles = new ArrayList<ServerFile>(files);
+        List<ServerFile> sortedFiles = new ArrayList<>(files);
 
         Collections.sort(sortedFiles, getFilesComparator());
 
@@ -523,10 +637,10 @@ public class ServerFilesFragment extends Fragment implements
 
     private Comparator<ServerFile> getFilesComparator() {
         switch (filesSort) {
-            case NAME:
+            case SORT_NAME:
                 return new FileNameComparator();
 
-            case MODIFICATION_TIME:
+            case SORT_MODIFICATION_TIME:
                 return new FileModificationTimeComparator();
 
             default:
@@ -551,12 +665,9 @@ public class ServerFilesFragment extends Fragment implements
 
     private void showFilesError() {
         ViewDirector.of(this, R.id.animator).show(R.id.error);
-        mErrorLinearLayout.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View view) {
-                ViewDirector.of(getActivity(), R.id.animator).show(android.R.id.progress);
-                setUpFilesContent();
-            }
+        mErrorLinearLayout.setOnClickListener(view -> {
+            ViewDirector.of(getActivity(), R.id.animator).show(android.R.id.progress);
+            setUpFilesContent();
         });
     }
 
@@ -572,25 +683,44 @@ public class ServerFilesFragment extends Fragment implements
         refreshLayout.setOnRefreshListener(this);
     }
 
-    @Override
-    public void onRefresh() {
-        setUpFilesContent();
+    private void setUpOfflineFileDatabase() {
+        mOfflineFileRepo = new OfflineFileRepository(getContext());
+    }
+
+    private List<ServerFile> checkOfflineFiles(List<ServerFile> serverFiles) {
+        for (ServerFile file : serverFiles) {
+            OfflineFile offlineFile = mOfflineFileRepo.getOfflineFile(file.getName(), file.getModificationTime().getTime());
+            if (offlineFile != null) {
+                file.setOffline(true);
+                if (offlineFile.getTimeStamp() < file.getModificationTime().getTime()) {
+                    offlineFile.setState(OfflineFile.OUT_OF_DATE);
+                    mOfflineFileRepo.update(offlineFile);
+                    startDownloadService(file);
+                }
+            }
+        }
+
+        return serverFiles;
     }
 
     @Override
-    public void onItemClick(AdapterView<?> filesListView, View fileView, int filePosition, long fileId) {
-        if (!areFilesActionsAvailable()) {
-            collapseSearchView();
-            startFileOpening(getFile(filePosition));
-
-            if (isDirectory(getFile(filePosition))) {
-                setUpTitle(getFile(filePosition).getName());
-            }
+    public void onRefresh() {
+        if (!isOfflineFragment()) {
+            setUpFilesContent();
+        } else {
+            showOfflineFiles();
         }
     }
 
-    private void startFileOpening(ServerFile file) {
-        BusProvider.getBus().post(new FileOpeningEvent(getShare(), getFiles(), file));
+    private void startFileOpening(int position) {
+        if (!isOfflineFragment()) {
+            BusProvider.getBus().post(new FileOpeningEvent(getShare(), getFiles(), getFile(position)));
+        } else {
+            ServerFile offlineServerFile = getListAdapter().getItem(position);
+            ArrayList<ServerFile> serverFiles = new ArrayList<>();
+            serverFiles.add(offlineServerFile);
+            BusProvider.getBus().post(new FileOpeningEvent(null, serverFiles, offlineServerFile));
+        }
     }
 
     private void setUpTitle(String title) {
@@ -637,7 +767,7 @@ public class ServerFilesFragment extends Fragment implements
 
     private void setSearchCursor() {
         final int textViewID = searchView.getContext().getResources().getIdentifier("android:id/search_src_text", null, null);
-        final AutoCompleteTextView searchTextView = (AutoCompleteTextView) searchView.findViewById(textViewID);
+        final AutoCompleteTextView searchTextView = searchView.findViewById(textViewID);
         try {
             Field mCursorDrawableRes = TextView.class.getDeclaredField("mCursorDrawableRes");
             mCursorDrawableRes.setAccessible(true);
@@ -648,11 +778,11 @@ public class ServerFilesFragment extends Fragment implements
 
     private void setUpFilesContentSortIcon(MenuItem menuItem) {
         switch (filesSort) {
-            case NAME:
+            case SORT_NAME:
                 menuItem.setIcon(R.drawable.ic_menu_sort_name);
                 break;
 
-            case MODIFICATION_TIME:
+            case SORT_MODIFICATION_TIME:
                 menuItem.setIcon(R.drawable.ic_menu_sort_modification_time);
                 break;
 
@@ -676,26 +806,32 @@ public class ServerFilesFragment extends Fragment implements
 
     private void setUpFilesContentSortSwitched() {
         switch (filesSort) {
-            case NAME:
-                filesSort = FilesSort.MODIFICATION_TIME;
+            case SORT_NAME:
+                filesSort = SORT_MODIFICATION_TIME;
                 break;
 
-            case MODIFICATION_TIME:
-                filesSort = FilesSort.NAME;
+            case SORT_MODIFICATION_TIME:
+                filesSort = SORT_NAME;
                 break;
 
             default:
                 break;
         }
 
+        saveSortOption();
+
         setUpFilesContentSort();
+    }
+
+    private void saveSortOption() {
+        Preferences.setSortOption(getContext(), filesSort);
     }
 
     private void setUpFilesContentSort() {
         if (!isMetadataAvailable()) {
-            getFilesAdapter().replaceWith(getShare(), sortFiles(getFiles()));
+            getFilesAdapter().replaceWith(getShare(), checkOfflineFiles(sortFiles(getFiles())));
         } else {
-            getFilesMetadataAdapter().replaceWith(getShare(), sortFiles(getFiles()));
+            getFilesMetadataAdapter().replaceWith(getShare(), checkOfflineFiles(sortFiles(getFiles())));
         }
     }
 
@@ -712,12 +848,6 @@ public class ServerFilesFragment extends Fragment implements
             getFilesMetadataAdapter().getFilter().filter(s);
         }
         return true;
-    }
-
-    @Override
-    public void isListEmpty(boolean empty) {
-        if (getView().findViewById(R.id.none_text) != null)
-            getView().findViewById(R.id.none_text).setVisibility(empty ? View.VISIBLE : View.GONE);
     }
 
     private void collapseSearchView() {
@@ -764,6 +894,8 @@ public class ServerFilesFragment extends Fragment implements
         super.onDestroyView();
         if (isMetadataAvailable()) {
             getFilesMetadataAdapter().tearDownCallbacks();
+        } else {
+            getFilesAdapter().tearDownCallbacks();
         }
     }
 
@@ -772,14 +904,13 @@ public class ServerFilesFragment extends Fragment implements
         super.onSaveInstanceState(outState);
 
         tearDownFilesState(outState);
+        outState.putInt(State.SELECTED_ITEM, lastSelectedFilePosition);
     }
 
     private void tearDownFilesState(Bundle state) {
         if (areFilesLoaded()) {
             state.putParcelableArrayList(State.FILES, new ArrayList<Parcelable>(getFiles()));
         }
-
-        state.putSerializable(State.FILES_SORT, filesSort);
     }
 
     private boolean areFilesLoaded() {
@@ -794,13 +925,47 @@ public class ServerFilesFragment extends Fragment implements
         }
     }
 
-    private enum FilesSort {
-        NAME, MODIFICATION_TIME
+    private void setItemSelected(int position) {
+        lastSelectedFilePosition = position;
+        getListAdapter().setSelectedPosition(position);
+    }
+
+    @Override
+    public void onItemClick(View view, int filePosition) {
+        collapseSearchView();
+        startFileOpening(filePosition);
+
+        if (!isOfflineFragment() && isDirectory(getFile(filePosition))) {
+            setUpTitle(getFile(filePosition).getName());
+        }
+    }
+
+    @Override
+    public void onMoreOptionClick(View view, int position) {
+        setItemSelected(position);
+        if (getListAdapter().getAdapterMode() != FilesFilterAdapter.AdapterMode.OFFLINE) {
+            Fragments.Builder.buildFileOptionsDialogFragment(getContext(), getCheckedFile())
+                .show(getChildFragmentManager(), "file_options_dialog");
+        } else {
+            Fragments.Builder.buildOfflineFileOptionsDialogFragment()
+                .show(getChildFragmentManager(), "file_options_dialog");
+        }
+    }
+
+    @Override
+    public void isListEmpty(boolean empty) {
+        if (getView().findViewById(R.id.none_text) != null)
+            getView().findViewById(R.id.none_text).setVisibility(empty ? View.VISIBLE : View.GONE);
+    }
+
+    @IntDef({SORT_MODIFICATION_TIME, SORT_NAME})
+    public @interface Types {
     }
 
     private static final class State {
         public static final String FILES = "files";
-        public static final String FILES_SORT = "files_sort";
+        public static final String SELECTED_ITEM = "selected_item";
+
         private State() {
         }
     }

@@ -42,6 +42,7 @@ public class PercentageView {
     public static final int BRIGHTNESS = 2;
     private ViewHolder viewHolder;
     private View view;
+
     public PercentageView(FrameLayout parentView) {
         LayoutInflater inflater = (LayoutInflater) parentView.getContext().getSystemService(Context.LAYOUT_INFLATER_SERVICE);
         view = inflater.inflate(R.layout.percentage_view, parentView, false);
@@ -95,9 +96,9 @@ public class PercentageView {
         private ImageView icon;
 
         ViewHolder(View itemView) {
-            progressBar = (ProgressBar) itemView.findViewById(R.id.progress_bar);
-            icon = (ImageView) itemView.findViewById(R.id.type_icon);
-            valuePercent = (TextView) itemView.findViewById(R.id.value_percent);
+            progressBar = itemView.findViewById(R.id.progress_bar);
+            icon = itemView.findViewById(R.id.type_icon);
+            valuePercent = itemView.findViewById(R.id.value_percent);
         }
     }
 }

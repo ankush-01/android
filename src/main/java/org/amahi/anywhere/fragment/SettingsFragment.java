@@ -44,6 +44,7 @@ import org.amahi.anywhere.server.ApiConnection;
 import org.amahi.anywhere.server.client.ServerClient;
 import org.amahi.anywhere.util.Android;
 import org.amahi.anywhere.util.Intents;
+import org.amahi.anywhere.util.Preferences;
 
 import java.util.Arrays;
 import java.util.List;
@@ -53,7 +54,7 @@ import javax.inject.Inject;
 /**
  * Settings fragment. Shows application's settings.
  */
-public class SettingsFragment extends PreferenceFragment implements Preference.OnPreferenceClickListener,
+public class SettingsFragment extends PreferenceFragment implements
     SharedPreferences.OnSharedPreferenceChangeListener,
     AccountManagerCallback<Boolean> {
     @Inject
@@ -122,36 +123,48 @@ public class SettingsFragment extends PreferenceFragment implements Preference.O
 
     private void setUpSettingsListeners() {
         Preference accountSignOut = getPreference(R.string.preference_key_account_sign_out);
+        Preference applicationIntro = getPreference(R.string.preference_key_about_intro);
         Preference applicationVersion = getPreference(R.string.preference_key_about_version);
         Preference applicationFeedback = getPreference(R.string.preference_key_about_feedback);
         Preference applicationRating = getPreference(R.string.preference_key_about_rating);
         Preference shareApp = getPreference(R.string.preference_key_tell_a_friend);
         Preference autoUpload = getPreference(R.string.preference_screen_key_upload);
 
-        accountSignOut.setOnPreferenceClickListener(this);
-        applicationVersion.setOnPreferenceClickListener(this);
-        applicationFeedback.setOnPreferenceClickListener(this);
-        applicationRating.setOnPreferenceClickListener(this);
-        shareApp.setOnPreferenceClickListener(this);
-        autoUpload.setOnPreferenceClickListener(this);
+        accountSignOut.setOnPreferenceClickListener(preference -> {
+            tearDownAccount();
+            return true;
+        });
+        applicationIntro.setOnPreferenceClickListener(preference -> {
+            setUpApplicationIntro();
+            return true;
+        });
+        applicationVersion.setOnPreferenceClickListener(preference -> {
+            setUpApplicationVersion();
+            return true;
+        });
+        applicationFeedback.setOnPreferenceClickListener(preference -> {
+            setUpApplicationFeedback();
+            return true;
+        });
+        applicationRating.setOnPreferenceClickListener(preference -> {
+            setUpApplicationRating();
+            return true;
+        });
+        shareApp.setOnPreferenceClickListener(preference -> {
+            sharedIntent();
+            return true;
+        });
+        autoUpload.setOnPreferenceClickListener(preference -> {
+            openUploadSettingsFragment();
+            return true;
+        });
+
     }
 
-    @Override
-    public boolean onPreferenceClick(Preference preference) {
-        if (preference.getKey().equals(getString(R.string.preference_key_account_sign_out))) {
-            tearDownAccount();
-        } else if (preference.getKey().equals(getString(R.string.preference_key_about_version))) {
-            setUpApplicationVersion();
-        } else if (preference.getKey().equals(getString(R.string.preference_key_about_feedback))) {
-            setUpApplicationFeedback();
-        } else if (preference.getKey().equals(getString(R.string.preference_key_about_rating))) {
-            setUpApplicationRating();
-        } else if (preference.getKey().equals(getString(R.string.preference_key_tell_a_friend))) {
-            sharedIntent();
-        } else if (preference.getKey().equals(getString(R.string.preference_screen_key_upload))) {
-            openUploadSettingsFragment();
-        }
-        return true;
+    private void setUpApplicationIntro() {
+        Preferences.setFirstRun(getActivity());
+        Intent intent = Intents.Builder.with(getActivity()).buildIntroductionIntent();
+        startActivity(intent);
     }
 
     private void openUploadSettingsFragment() {
@@ -277,6 +290,9 @@ public class SettingsFragment extends PreferenceFragment implements Preference.O
 
         setUpSettingsPreferenceListener();
         setUpTitle();
+
+        // for updating Auto Upload Title
+        getPreference(R.string.preference_screen_key_upload).setSummary(getAutoUploadSummary());
     }
 
     private void setUpSettingsPreferenceListener() {

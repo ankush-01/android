@@ -20,4 +20,16 @@
 package org.amahi.anywhere.bus;
 
 public class ServerSharesLoadFailedEvent implements BusEvent {
+    private String error;
+
+    public ServerSharesLoadFailedEvent() {
+    }
+
+    public ServerSharesLoadFailedEvent(String error) {
+        this.error = error;
+    }
+
+    public String getError() {
+        return error;
+    }
 }

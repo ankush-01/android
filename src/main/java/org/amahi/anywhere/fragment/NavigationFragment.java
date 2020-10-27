@@ -41,8 +41,9 @@ import android.view.MenuInflater;
 import android.view.MenuItem;
 import android.view.View;
 import android.view.ViewGroup;
-import android.widget.AdapterView;
-import android.widget.Spinner;
+import android.widget.LinearLayout;
+import android.widget.TextView;
+import android.widget.Toast;
 
 import com.squareup.otto.Subscribe;
 
@@ -51,11 +52,13 @@ import org.amahi.anywhere.R;
 import org.amahi.anywhere.account.AmahiAccount;
 import org.amahi.anywhere.activity.IntroductionActivity;
 import org.amahi.anywhere.adapter.NavigationDrawerAdapter;
-import org.amahi.anywhere.adapter.ServersAdapter;
 import org.amahi.anywhere.bus.AppsSelectedEvent;
 import org.amahi.anywhere.bus.BusProvider;
+import org.amahi.anywhere.bus.OfflineFilesSelectedEvent;
+import org.amahi.anywhere.bus.RecentFilesSelectedEvent;
 import org.amahi.anywhere.bus.ServerConnectedEvent;
 import org.amahi.anywhere.bus.ServerConnectionChangedEvent;
+import org.amahi.anywhere.bus.ServerConnectionFailedEvent;
 import org.amahi.anywhere.bus.ServersLoadFailedEvent;
 import org.amahi.anywhere.bus.ServersLoadedEvent;
 import org.amahi.anywhere.bus.SettingsSelectedEvent;
@@ -80,25 +83,26 @@ import javax.inject.Inject;
  * Navigation fragments. Shows main application sections and servers list as well.
  */
 public class NavigationFragment extends Fragment implements AccountManagerCallback<Bundle>,
-    OnAccountsUpdateListener,
-    AdapterView.OnItemSelectedListener,
-    SwipeRefreshLayout.OnRefreshListener {
+    OnAccountsUpdateListener {
     @Inject
     AmahiClient amahiClient;
     @Inject
     ServerClient serverClient;
+    View view;
     private Intent tvIntent;
+
+    private boolean areServersVisible;
+    private List<Server> serversList;
 
     @Override
     public View onCreateView(LayoutInflater layoutInflater, ViewGroup container, Bundle savedInstanceState) {
-        return layoutInflater.inflate(R.layout.fragment_navigation, container, false);
+        view = layoutInflater.inflate(R.layout.fragment_navigation, container, false);
+        return view;
     }
 
     @Override
     public void onActivityCreated(Bundle savedInstanceState) {
         super.onActivityCreated(savedInstanceState);
-
-        launchIntro();
 
         setUpInjections();
 
@@ -109,13 +113,7 @@ public class NavigationFragment extends Fragment implements AccountManagerCallba
         setUpContentRefreshing();
 
         setUpServers(savedInstanceState);
-    }
 
-    private void launchIntro() {
-        if (Preferences.getFirstRun(getContext()) && !CheckTV.isATV(getContext())) {
-            Preferences.setFirstRun(getContext());
-            startActivity(new Intent(getContext(), IntroductionActivity.class));
-        }
     }
 
     private void setUpInjections() {
@@ -136,13 +134,19 @@ public class NavigationFragment extends Fragment implements AccountManagerCallba
 
     @Override
     public void onAccountsUpdated(Account[] accounts) {
-        if (isVisible()) {
-            return;
+
+        if (Preferences.getFirstRun(getContext())) {
+            launchIntro();
         }
 
         if (getAccounts().isEmpty()) {
             setUpAccount();
         }
+    }
+
+    private void launchIntro() {
+        startActivity(new Intent(getContext(), IntroductionActivity.class));
+        getActivity().finishAffinity();
     }
 
     private void setUpContentRefreshing() {
@@ -154,13 +158,10 @@ public class NavigationFragment extends Fragment implements AccountManagerCallba
             android.R.color.holo_green_light,
             android.R.color.holo_red_light);
 
-        refreshLayout.setOnRefreshListener(this);
-    }
-
-    @Override
-    public void onRefresh() {
-        ViewDirector.of(this, R.id.animator_content).show(R.id.empty_view);
-        setUpServers(new Bundle());
+        refreshLayout.setOnRefreshListener(() -> {
+            ViewDirector.of(getActivity(), R.id.animator_content).show(R.id.empty_view);
+            setUpServers(new Bundle());
+        });
     }
 
     private List<Account> getAccounts() {
@@ -202,24 +203,21 @@ public class NavigationFragment extends Fragment implements AccountManagerCallba
 
     private void setUpServers(Bundle state) {
         getRefreshLayout().setRefreshing(true);
-        setUpServersAdapter();
+        setUpNavigationState(state);
         setUpServersContent(state);
-        setUpServersListener();
-    }
 
-    private void setUpServersAdapter() {
-        if (!areServersLoaded())
-            getServersSpinner().setAdapter(new ServersAdapter(getActivity()));
-    }
-
-    private Spinner getServersSpinner() {
-        return (Spinner) getView().findViewById(R.id.spinner_servers);
+        setUpNavigationListener();
     }
 
     private void setUpServersContent(Bundle state) {
+        this.serversList = new ArrayList<>();
+
         if (isServersStateValid(state)) {
             setUpServersState(state);
             setUpNavigation();
+
+            this.serversList = state.getParcelableArrayList(State.SERVERS);
+            selectSavedServer(serversList);
         } else {
             setUpAuthentication();
         }
@@ -238,26 +236,31 @@ public class NavigationFragment extends Fragment implements AccountManagerCallba
     }
 
     private void setUpServersContent(List<Server> servers) {
-        if (!CheckTV.isATV(getContext()))
-            getServersAdapter().replaceWith(filterActiveServers(servers));
-        else {
-            List<Server> serverList = filterActiveServers(servers);
-            String serverName = Preferences.getPreference(getContext()).getString(getString(R.string.pref_server_select_key), servers.get(0).getName());
+        if (!CheckTV.isATV(getContext())) {
+            replaceServersList(filterActiveServers(servers));
+        } else {
+            serversList = filterActiveServers(servers);
+            String serverName = Preferences.getPreference(getContext()).getString(getString(R.string.pref_server_select_key), serversList.get(0).getName());
 
-            if (serverList.get(0).getName().matches(serverName))
-                getServersAdapter().replaceWith(serverList);
+            if (serversList.get(0).getName().matches(serverName))
+                replaceServersList(serversList);
 
             else {
-                int index = findTheServer(serverList);
-                getServersAdapter().replaceWith(swappedServers(index, serverList));
+                int index = findTheServer(serversList);
+                replaceServersList(swappedServers(index, serversList));
             }
         }
     }
 
+    private void replaceServersList(List<Server> servers) {
+        this.serversList.clear();
+        this.serversList.addAll(servers);
+    }
+
     private int findTheServer(List<Server> serverList) {
         String serverName = Preferences.getPreference(getContext()).getString(getString(R.string.pref_server_select_key), serverList.get(0).getName());
-        int i;
-        for (i = 0; i < serverList.size(); i++) {
+
+        for (int i = 0; i < serverList.size(); i++) {
             if (serverName.matches(serverList.get(i).getName()))
                 return i;
         }
@@ -271,12 +274,12 @@ public class NavigationFragment extends Fragment implements AccountManagerCallba
         return serverList;
     }
 
-    private ServersAdapter getServersAdapter() {
-        return (ServersAdapter) getServersSpinner().getAdapter();
+    private List<Server> getServersList() {
+        return serversList;
     }
 
     private List<Server> filterActiveServers(List<Server> servers) {
-        List<Server> activeServers = new ArrayList<Server>();
+        List<Server> activeServers = new ArrayList<>();
 
         for (Server server : servers) {
             if (server.isActive()) {
@@ -296,14 +299,21 @@ public class NavigationFragment extends Fragment implements AccountManagerCallba
         if (getAccounts().isEmpty()) {
             setUpAccount();
         } else {
+            if (Preferences.getFirstRun(getActivity()) && !CheckTV.isATV(getActivity())) {
+                launchIntro();
+            }
             setUpAuthenticationToken();
         }
     }
 
+    private void setUpNavigationState(Bundle state) {
+        if (isServersStateValid(state)) {
+            areServersVisible = state.getBoolean(State.SERVERS_VISIBLE, false);
+        }
+    }
+
     private void setUpServers(String authenticationToken) {
-        setUpServersAdapter();
         setUpServersContent(authenticationToken);
-        setUpServersListener();
     }
 
     private void setUpServersContent(String authenticationToken) {
@@ -316,6 +326,8 @@ public class NavigationFragment extends Fragment implements AccountManagerCallba
 
         setUpNavigation();
 
+        selectSavedServer(event.getServers());
+
         showContent();
 
         tvIntent = new Intent(getContext(), MainTVActivity.class);
@@ -324,17 +336,39 @@ public class NavigationFragment extends Fragment implements AccountManagerCallba
     }
 
     private SwipeRefreshLayout getRefreshLayout() {
-        return (SwipeRefreshLayout) getView().findViewById(R.id.layout_refresh);
+        return getView().findViewById(R.id.layout_refresh);
     }
 
     private void setUpNavigation() {
-        setUpNavigationAdapter();
-        setUpNavigationListener();
+        setUpNavigationList();
+
+        setUpServerSelectListener();
+    }
+
+    private void setUpNavigationList() {
+        getNavigationListView().setVisibility(View.VISIBLE);
+        getNavigationListView().setLayoutManager(new LinearLayoutManager(getContext(), LinearLayoutManager.VERTICAL, false));
+
+        if (!areServersVisible) {
+            showNavigationItems();
+        } else {
+            showServers();
+            hideOfflineLayout();
+            hideRecentLayout();
+        }
+
+    }
+
+    private void hideOfflineLayout() {
+        getOfflineFilesLayout().setVisibility(View.GONE);
+    }
+
+    private void hideRecentLayout() {
+        getRecentFilesLayout().setVisibility(View.GONE);
     }
 
     private void setUpNavigationAdapter() {
         //Setting the layout of a vertical list dynamically.
-        getNavigationListView().setLayoutManager(new LinearLayoutManager(getContext(), LinearLayoutManager.VERTICAL, false));
 
         if (!serverClient.isConnected()) {
             getNavigationListView().setAdapter(NavigationDrawerAdapter.newRemoteAdapter(getActivity()));
@@ -352,65 +386,185 @@ public class NavigationFragment extends Fragment implements AccountManagerCallba
         return (RecyclerView) getView().findViewById(R.id.list_navigation);
     }
 
+    private LinearLayout getOfflineFilesLayout() {
+        return getView().findViewById(R.id.offline_files_layout);
+    }
+
+    private LinearLayout getRecentFilesLayout() {
+        return getView().findViewById(R.id.recent_files_layout);
+    }
+
+    private LinearLayout getLinearLayoutSelectedServer() {
+        return getView().findViewById(R.id.server_select_LinearLayout);
+    }
+
+    private TextView getServerNameTextView() {
+        return getView().findViewById(R.id.server_name);
+    }
+
     private void setUpNavigationListener() {
-        getNavigationListView().addOnItemTouchListener(new RecyclerItemClickListener(getContext(), new RecyclerItemClickListener.OnItemClickListener() {
-            @Override
-            public void onItemClick(View view, int position) {
-                view.setActivated(true);
-                switch (position) {
-                    case NavigationDrawerAdapter.NavigationItems.SHARES:
-                        BusProvider.getBus().post(new SharesSelectedEvent());
-                        break;
+        getNavigationListView().addOnItemTouchListener(new RecyclerItemClickListener(getContext(), (view, position) -> {
+            getNavigationListView().dispatchSetActivated(false);
 
-                    case NavigationDrawerAdapter.NavigationItems.APPS:
-                        BusProvider.getBus().post(new AppsSelectedEvent());
-                        break;
+            view.setActivated(true);
 
-                    default:
-                        break;
-                }
+            if (!areServersVisible) {
+                selectedServerListener(position);
+            } else {
+                serverClicked(position);
             }
         }));
+
+        getOfflineFilesLayout().setOnClickListener(view -> showOfflineFiles());
+
+        getRecentFilesLayout().setOnClickListener(view -> showRecentFiles());
+    }
+
+    private void selectedServerListener(int position) {
+
+        switch (position) {
+            case NavigationDrawerAdapter.NavigationItems.SHARES:
+                BusProvider.getBus().post(new SharesSelectedEvent());
+                break;
+
+            case NavigationDrawerAdapter.NavigationItems.APPS:
+                BusProvider.getBus().post(new AppsSelectedEvent());
+                break;
+
+            default:
+                break;
+        }
+    }
+
+    private void selectSavedServer(List<Server> servers) {
+        String serverName = getServerName();
+
+        List<Server> activeServers = filterActiveServers(servers);
+        if (serverName != null) {
+            for (int i = 0; i < activeServers.size(); i++) {
+                if (activeServers.get(i).getName().equals(serverName)) {
+                    getServerNameTextView().setText(serverName);
+                    setUpServerConnection(activeServers.get(i));
+                    storeServerName(activeServers.get(i));
+                    return;
+                }
+            }
+        }
+
+        selectFirstServer(activeServers);
+    }
+
+    private void selectFirstServer(List<Server> activeServers) {
+        if (!activeServers.isEmpty()) {
+            getServerNameTextView().setText(activeServers.get(0).getName());
+            setUpServerConnection(activeServers.get(0));
+            storeServerName(activeServers.get(0));
+        } else {
+            String serverName = getServerName();
+            if (serverName != null) {
+                getServerNameTextView().setText(serverName);
+            }
+        }
+    }
+
+    private void serverClicked(int position) {
+        setupServer(position);
+
+        //Changing the Title Server Name
+        getServerNameTextView().setText(getServersList().get(position).getName());
+
+        storeServerName(getServersList().get(position));
+
+        BusProvider.getBus().post(new SharesSelectedEvent());
+    }
+
+    public void setupServer(int position) {
+        //Setting up server
+        Server server = getServersList().get(position);
+        setUpServerConnection(server);
+    }
+
+    private void setUpServerSelectListener() {
+        getLinearLayoutSelectedServer().setOnClickListener(view -> {
+            if (areServersVisible) {
+                showNavigationItems();
+            } else {
+                showServers();
+                hideOfflineLayout();
+                hideRecentLayout();
+            }
+        });
+    }
+
+    private void showNavigationItems() {
+        areServersVisible = false;
+        setUpNavigationAdapter();
+
+        getServerNameTextView().setCompoundDrawablesWithIntrinsicBounds(
+            0, 0, R.drawable.nav_arrow_down, 0);
+
+        getOfflineFilesLayout().setVisibility(View.VISIBLE);
+        getRecentFilesLayout().setVisibility(View.VISIBLE);
     }
 
     @Subscribe
     public void onServersLoadFailed(ServersLoadFailedEvent event) {
-        showError();
+        showOfflineNavigation();
     }
 
-    private void showError() {
+    private void showOfflineNavigation() {
         getRefreshLayout().setRefreshing(false);
-        ViewDirector.of(this, R.id.animator_content).show(R.id.layout_error);
+
+        String serverName = getServerName();
+        if (serverName != null) {
+            getServerNameTextView().setText(serverName);
+        }
+
+        getOfflineFilesLayout().setVisibility(View.VISIBLE);
+        getRecentFilesLayout().setVisibility(View.VISIBLE);
+
+        getOfflineFilesLayout().setOnClickListener(
+            view ->
+                showOfflineFiles()
+        );
+
+        areServersVisible = false;
+        setUpNavigationList();
+        getLinearLayoutSelectedServer().setOnClickListener((v) -> {
+            Toast.makeText(getContext(), R.string.message_connection_error, Toast.LENGTH_SHORT).show();
+        });
+
+        showContent();
+        Toast.makeText(getContext(), R.string.message_connection_error, Toast.LENGTH_SHORT).show();
     }
 
-    private void setUpServersListener() {
-        getServersSpinner().setOnItemSelectedListener(this);
-    }
-
-    @Override
-    public void onNothingSelected(AdapterView<?> spinnerView) {
-    }
-
-    @Override
-    public void onItemSelected(AdapterView<?> spinnerView, View view, int position, long id) {
-        Server server = getServersAdapter().getItem(position);
-
-        setUpServerConnection(server);
+    @Subscribe
+    public void onServerConnectionFailed(ServerConnectionFailedEvent event) {
+        showOfflineNavigation();
     }
 
     private void setUpServerConnection(Server server) {
         if (serverClient.isConnected(server)) {
             setUpServerConnection();
-            setUpServerNavigation();
         } else {
             serverClient.connect(getContext(), server);
         }
     }
 
+    private void storeServerName(Server server) {
+        Preferences.setServerName(getContext(), server.getName());
+    }
+
+    private String getServerName() {
+        return Preferences.getServerName(getContext());
+    }
+
     @Subscribe
     public void onServerConnected(ServerConnectedEvent event) {
         setUpServerConnection();
-        setUpServerNavigation();
+        setUpNavigationList();
+        showContent();
+
         if (CheckTV.isATV(getContext())) launchTV();
     }
 
@@ -451,13 +605,18 @@ public class NavigationFragment extends Fragment implements AccountManagerCallba
         return preferenceConnection.equals(getString(R.string.preference_key_server_connection_local));
     }
 
-    private void setUpServerNavigation() {
-        setUpNavigationAdapter();
+    private void showOfflineFiles() {
+        BusProvider.getBus().post(new OfflineFilesSelectedEvent());
+    }
+
+    private void showRecentFiles() {
+        BusProvider.getBus().post(new RecentFilesSelectedEvent());
     }
 
     @Subscribe
     public void onServerConnectionChanged(ServerConnectionChangedEvent event) {
-        setUpServerNavigation();
+        areServersVisible = false;
+        setUpNavigationList();
     }
 
     @Override
@@ -502,12 +661,14 @@ public class NavigationFragment extends Fragment implements AccountManagerCallba
 
     private void tearDownServersState(Bundle state) {
         if (areServersLoaded()) {
-            state.putParcelableArrayList(State.SERVERS, new ArrayList<Parcelable>(getServersAdapter().getItems()));
+            state.putParcelableArrayList(State.SERVERS, new ArrayList<Parcelable>(getServersList()));
         }
+
+        state.putBoolean(State.SERVERS_VISIBLE, areServersVisible);
     }
 
     private boolean areServersLoaded() {
-        return getServersAdapter() != null;
+        return getServersList() != null;
     }
 
     @Override
@@ -521,8 +682,25 @@ public class NavigationFragment extends Fragment implements AccountManagerCallba
         getAccountManager().removeOnAccountsUpdatedListener(this);
     }
 
+    /*Sets the adapter for navigation drawer after getting server names*/
+    public void showServers() {
+        areServersVisible = true;
+        getNavigationListView().setAdapter(null);
+        getNavigationListView().setAdapter(new NavigationDrawerAdapter(getContext(), getServerNames()));
+        getServerNameTextView().setCompoundDrawablesWithIntrinsicBounds(
+            0, 0, R.drawable.nav_arrow_up, 0);
+    }
+
+    public ArrayList<String> getServerNames() {
+        ArrayList<String> serverArray = new ArrayList<>();
+        for (int i = 0; i < getServersList().size(); i++)
+            serverArray.add(getServersList().get(i).getName());
+        return serverArray;
+    }
+
     private static final class State {
-        public static final String SERVERS = "servers";
+        static final String SERVERS = "servers";
+        static final String SERVERS_VISIBLE = "servers_visible";
 
         private State() {
         }

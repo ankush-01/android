@@ -33,6 +33,9 @@ import org.amahi.anywhere.R;
 import org.amahi.anywhere.bus.BusProvider;
 import org.amahi.anywhere.bus.FileDownloadFailedEvent;
 import org.amahi.anywhere.bus.FileDownloadedEvent;
+import org.amahi.anywhere.db.entities.RecentFile;
+import org.amahi.anywhere.db.repositories.RecentFileRepository;
+import org.amahi.anywhere.model.FileOption;
 import org.amahi.anywhere.server.client.ServerClient;
 import org.amahi.anywhere.server.model.ServerFile;
 import org.amahi.anywhere.server.model.ServerShare;
@@ -53,12 +56,13 @@ public class ServerFileDownloadingFragment extends DialogFragment {
     @Inject
     ServerClient serverClient;
 
-    public static ServerFileDownloadingFragment newInstance(ServerShare share, ServerFile file) {
+    public static ServerFileDownloadingFragment newInstance(ServerShare share, ServerFile file, @FileOption.Types int fileAction) {
         ServerFileDownloadingFragment fragment = new ServerFileDownloadingFragment();
 
         Bundle arguments = new Bundle();
         arguments.putParcelable(Fragments.Arguments.SERVER_SHARE, share);
         arguments.putParcelable(Fragments.Arguments.SERVER_FILE, file);
+        arguments.putInt(Fragments.Arguments.FILE_OPTION, fileAction);
         fragment.setArguments(arguments);
 
         return fragment;
@@ -88,12 +92,26 @@ public class ServerFileDownloadingFragment extends DialogFragment {
 
     private void startFileDownloading(Bundle state) {
         if (state == null) {
-            downloader.startFileDownloading(getFileUri(), getFile().getName());
+            int fileOption = getArguments().getInt(Fragments.Arguments.FILE_OPTION, 0);
+            downloader.startFileDownloading(getFileUri(), getFile().getName(), fileOption);
         }
     }
 
     private Uri getFileUri() {
-        return serverClient.getFileUri(getShare(), getFile());
+        if (getShare() != null) {
+            return serverClient.getFileUri(getShare(), getFile());
+        } else {
+            return getUriFrom(getRecentFile(getFile()));
+        }
+    }
+
+    private Uri getUriFrom(RecentFile recentFile) {
+        return Uri.parse(recentFile.getUri());
+    }
+
+    private RecentFile getRecentFile(ServerFile file) {
+        RecentFileRepository repository = new RecentFileRepository(getActivity());
+        return repository.getRecentFile(file.getUniqueKey());
     }
 
     private ServerShare getShare() {

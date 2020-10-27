@@ -22,9 +22,12 @@ package org.amahi.anywhere.server.model;
 import android.net.Uri;
 import android.os.Parcel;
 import android.os.Parcelable;
+import android.support.annotation.Nullable;
 
 import com.google.gson.annotations.SerializedName;
 
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.Date;
 
 /**
@@ -54,6 +57,13 @@ public class ServerFile implements Parcelable {
     private long size;
     private ServerFileMetadata fileMetadata;
     private boolean isMetaDataFetched;
+    private boolean isOffline;
+
+    public ServerFile(String name, long timeStamp, String mime) {
+        this.name = name;
+        this.modificationTime = new Date(timeStamp);
+        this.mime = mime;
+    }
 
     private ServerFile(Parcel parcel) {
         this.parentFile = parcel.readParcelable(ServerFile.class.getClassLoader());
@@ -63,8 +73,20 @@ public class ServerFile implements Parcelable {
         this.size = parcel.readLong();
     }
 
+    public static int compareByName(ServerFile a, ServerFile b) {
+        return a.getName().compareTo(b.getName());
+    }
+
+    public static int compareByModificationTime(ServerFile a, ServerFile b) {
+        return -a.getModificationTime().compareTo(b.getModificationTime());
+    }
+
     public long getSize() {
         return size;
+    }
+
+    public void setSize(long size) {
+        this.size = size;
     }
 
     public ServerShare getParentShare() {
@@ -95,6 +117,10 @@ public class ServerFile implements Parcelable {
         return mime;
     }
 
+    public void setMime(String mime) {
+        this.mime = mime;
+    }
+
     public Date getModificationTime() {
         return modificationTime;
     }
@@ -105,6 +131,32 @@ public class ServerFile implements Parcelable {
 
     public void setFileMetadata(ServerFileMetadata fileMetadata) {
         this.fileMetadata = fileMetadata;
+    }
+
+    public boolean isOffline() {
+        return isOffline;
+    }
+
+    public void setOffline(boolean offline) {
+        isOffline = offline;
+    }
+
+    @Nullable
+    public String getUniqueKey() {
+        try {
+            MessageDigest md = MessageDigest.getInstance("MD5");
+            md.update(getName().getBytes());
+            md.update(getModificationTime().toString().getBytes());
+            byte[] digest = md.digest();
+            StringBuilder sb = new StringBuilder();
+            for (byte aDigest : digest) {
+                sb.append(Integer.toHexString((aDigest & 0xFF) | 0x100).substring(1, 3));
+            }
+            return sb.toString();
+        } catch (NoSuchAlgorithmException e) {
+            e.printStackTrace();
+            return null;
+        }
     }
 
     public boolean isMetaDataFetched() {
@@ -178,10 +230,6 @@ public class ServerFile implements Parcelable {
             return false;
         }
 
-        if (!modificationTime.equals(file.modificationTime)) {
-            return false;
-        }
-
-        return true;
+        return modificationTime.equals(file.modificationTime);
     }
 }

@@ -25,14 +25,19 @@ import android.content.Context;
 import org.amahi.anywhere.activity.AuthenticationActivity;
 import org.amahi.anywhere.activity.NativeVideoActivity;
 import org.amahi.anywhere.activity.NavigationActivity;
+import org.amahi.anywhere.activity.OfflineFilesActivity;
+import org.amahi.anywhere.activity.RecentFilesActivity;
 import org.amahi.anywhere.activity.ServerAppActivity;
 import org.amahi.anywhere.activity.ServerFileAudioActivity;
 import org.amahi.anywhere.activity.ServerFileImageActivity;
 import org.amahi.anywhere.activity.ServerFileVideoActivity;
 import org.amahi.anywhere.activity.ServerFileWebActivity;
 import org.amahi.anywhere.activity.ServerFilesActivity;
+import org.amahi.anywhere.cache.CacheModule;
+import org.amahi.anywhere.fragment.AudioListFragment;
 import org.amahi.anywhere.fragment.NavigationFragment;
 import org.amahi.anywhere.fragment.ServerAppsFragment;
+import org.amahi.anywhere.fragment.ServerFileAudioFragment;
 import org.amahi.anywhere.fragment.ServerFileDownloadingFragment;
 import org.amahi.anywhere.fragment.ServerFileImageFragment;
 import org.amahi.anywhere.fragment.ServerFilesFragment;
@@ -41,8 +46,10 @@ import org.amahi.anywhere.fragment.SettingsFragment;
 import org.amahi.anywhere.fragment.UploadSettingsFragment;
 import org.amahi.anywhere.server.ApiModule;
 import org.amahi.anywhere.service.AudioService;
+import org.amahi.anywhere.service.DownloadService;
 import org.amahi.anywhere.service.UploadService;
 import org.amahi.anywhere.service.VideoService;
+import org.amahi.anywhere.task.AudioMetadataRetrievingTask;
 import org.amahi.anywhere.tv.activity.TVWebViewActivity;
 import org.amahi.anywhere.tv.activity.TvPlaybackAudioActivity;
 import org.amahi.anywhere.tv.activity.TvPlaybackVideoActivity;
@@ -63,37 +70,44 @@ import dagger.Provides;
  */
 @Module(
     includes = {
-        ApiModule.class
+        ApiModule.class,
+        CacheModule.class
     },
     injects = {
         AuthenticationActivity.class,
         NavigationActivity.class,
         ServerAppActivity.class,
+        OfflineFilesActivity.class,
         ServerFilesActivity.class,
         ServerFileAudioActivity.class,
         ServerFileImageActivity.class,
         ServerFileVideoActivity.class,
         NativeVideoActivity.class,
+        RecentFilesActivity.class,
         ServerFileWebActivity.class,
         NavigationFragment.class,
         ServerSharesFragment.class,
         ServerAppsFragment.class,
         ServerFilesFragment.class,
         ServerFileImageFragment.class,
+        ServerFileAudioFragment.class,
         ServerFileDownloadingFragment.class,
         SettingsFragment.class,
         UploadSettingsFragment.class,
+        AudioListFragment.class,
         AudioService.class,
         VideoService.class,
         MainTVFragment.class,
         TVWebViewActivity.class,
         ServerFileTvFragment.class,
         UploadService.class,
+        DownloadService.class,
         UploadManager.class,
         TvPlaybackVideoFragment.class,
         TvPlaybackVideoActivity.class,
         TvPlaybackAudioActivity.class,
-        TvPlaybackAudioFragment.class
+        TvPlaybackAudioFragment.class,
+        AudioMetadataRetrievingTask.class
     }
 )
 class AmahiModule {

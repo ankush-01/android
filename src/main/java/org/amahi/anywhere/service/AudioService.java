@@ -25,12 +25,10 @@ import android.content.Context;
 import android.content.Intent;
 import android.graphics.Bitmap;
 import android.media.AudioManager;
-import android.media.MediaPlayer;
 import android.net.Uri;
 import android.os.Binder;
 import android.os.Bundle;
 import android.os.IBinder;
-import android.os.PowerManager;
 import android.os.RemoteException;
 import android.os.SystemClock;
 import android.support.annotation.NonNull;
@@ -43,11 +41,28 @@ import android.support.v4.media.session.MediaSessionCompat;
 import android.support.v4.media.session.PlaybackStateCompat;
 import android.text.TextUtils;
 
+import com.google.android.exoplayer2.DefaultLoadControl;
+import com.google.android.exoplayer2.DefaultRenderersFactory;
+import com.google.android.exoplayer2.ExoPlaybackException;
+import com.google.android.exoplayer2.ExoPlayer;
+import com.google.android.exoplayer2.ExoPlayerFactory;
+import com.google.android.exoplayer2.PlaybackParameters;
+import com.google.android.exoplayer2.Player;
+import com.google.android.exoplayer2.SimpleExoPlayer;
+import com.google.android.exoplayer2.Timeline;
+import com.google.android.exoplayer2.source.ExtractorMediaSource;
+import com.google.android.exoplayer2.source.MediaSource;
+import com.google.android.exoplayer2.source.TrackGroupArray;
+import com.google.android.exoplayer2.trackselection.DefaultTrackSelector;
+import com.google.android.exoplayer2.trackselection.TrackSelectionArray;
+import com.google.android.exoplayer2.upstream.DefaultDataSourceFactory;
+import com.google.android.exoplayer2.upstream.DefaultHttpDataSourceFactory;
 import com.squareup.otto.Subscribe;
 
 import org.amahi.anywhere.AmahiApplication;
 import org.amahi.anywhere.R;
 import org.amahi.anywhere.bus.AudioCompletedEvent;
+import org.amahi.anywhere.bus.AudioControlChangeEvent;
 import org.amahi.anywhere.bus.AudioControlNextEvent;
 import org.amahi.anywhere.bus.AudioControlPauseEvent;
 import org.amahi.anywhere.bus.AudioControlPlayEvent;
@@ -56,16 +71,25 @@ import org.amahi.anywhere.bus.AudioControlPreviousEvent;
 import org.amahi.anywhere.bus.AudioMetadataRetrievedEvent;
 import org.amahi.anywhere.bus.AudioPreparedEvent;
 import org.amahi.anywhere.bus.BusProvider;
+import org.amahi.anywhere.db.entities.OfflineFile;
+import org.amahi.anywhere.db.entities.RecentFile;
+import org.amahi.anywhere.db.repositories.OfflineFileRepository;
+import org.amahi.anywhere.db.repositories.RecentFileRepository;
+import org.amahi.anywhere.model.AudioMetadata;
 import org.amahi.anywhere.receiver.AudioReceiver;
 import org.amahi.anywhere.server.client.ServerClient;
 import org.amahi.anywhere.server.model.ServerFile;
 import org.amahi.anywhere.server.model.ServerShare;
 import org.amahi.anywhere.task.AudioMetadataRetrievingTask;
 import org.amahi.anywhere.util.AudioMetadataFormatter;
+import org.amahi.anywhere.util.Downloader;
+import org.amahi.anywhere.util.Identifier;
 import org.amahi.anywhere.util.Intents;
 import org.amahi.anywhere.util.MediaNotificationManager;
+import org.amahi.anywhere.util.Preferences;
 
-import java.io.IOException;
+import java.io.File;
+import java.util.Date;
 import java.util.List;
 
 import javax.inject.Inject;
@@ -77,19 +101,18 @@ import javax.inject.Inject;
  */
 public class AudioService extends MediaBrowserServiceCompat implements
     AudioManager.OnAudioFocusChangeListener,
-    MediaPlayer.OnPreparedListener,
-    MediaPlayer.OnCompletionListener,
-    MediaPlayer.OnErrorListener {
+    Player.EventListener {
     @Inject
     ServerClient serverClient;
     private MediaNotificationManager mMediaNotificationManager;
-    private MediaPlayer audioPlayer;
+    private SimpleExoPlayer audioPlayer;
     private MediaSessionCompat mediaSession;
     private AudioFocus audioFocus;
 
     private ServerShare audioShare;
     private List<ServerFile> audioFiles;
     private ServerFile audioFile;
+    private boolean isPreparing = false;
 
     private AudioMetadataFormatter audioMetadataFormatter;
     private Bitmap audioAlbumArt;
@@ -142,15 +165,17 @@ public class AudioService extends MediaBrowserServiceCompat implements
     }
 
     private void setUpAudioPlayer() {
-        audioPlayer = new MediaPlayer();
+        audioPlayer =
+            ExoPlayerFactory.newSimpleInstance(new DefaultRenderersFactory(this), new DefaultTrackSelector(), new DefaultLoadControl());
+        audioPlayer.addListener(this);
+        audioPlayer.setPlayWhenReady(true);
+        audioPlayer.setVolume(1.0f);
+    }
 
-        audioPlayer.setAudioStreamType(AudioManager.STREAM_MUSIC);
-        audioPlayer.setWakeMode(this, PowerManager.PARTIAL_WAKE_LOCK);
-        audioPlayer.setVolume(1.0f, 1.0f);
-
-        audioPlayer.setOnPreparedListener(this);
-        audioPlayer.setOnCompletionListener(this);
-        audioPlayer.setOnErrorListener(this);
+    private MediaSource buildMediaSource(Uri uri) {
+        return new ExtractorMediaSource.Factory(
+            new DefaultHttpDataSourceFactory(Identifier.getUserAgent(this)))
+            .createMediaSource(uri);
     }
 
     private void setUpAudioPlayerRemote() {
@@ -179,11 +204,13 @@ public class AudioService extends MediaBrowserServiceCompat implements
             .setActions(getAvailableActions())
             .build());
 
-        audioManager.requestAudioFocus(this, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN);
+        if (audioManager != null) {
+            audioManager.requestAudioFocus(this, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN);
+        }
     }
 
     public boolean isAudioStarted() {
-        return (audioShare != null) && (audioFiles != null) && (audioFile != null);
+        return (audioFiles != null) && (audioFile != null);
     }
 
     public void startAudio(ServerShare audioShare, List<ServerFile> audioFiles, ServerFile audioFile) {
@@ -191,48 +218,96 @@ public class AudioService extends MediaBrowserServiceCompat implements
         this.audioFiles = audioFiles;
         this.audioFile = audioFile;
 
+        pauseAudio();
         setUpAudioPlayback();
         setUpAudioMetadata();
     }
 
     private void setUpAudioPlayback() {
-        try {
-            audioPlayer.setDataSource(getAudioUri().toString());
-            audioPlayer.prepareAsync();
-        } catch (IOException e) {
-            throw new RuntimeException(e);
+        setUpRecentFiles();
+
+        MediaSource mediaSource;
+        if (isFileAvailableOffline(getAudioFile())) {
+            mediaSource = new ExtractorMediaSource.Factory(
+                new DefaultDataSourceFactory(this, Identifier.getUserAgent(this)))
+                .createMediaSource(getOfflineFileUri(getAudioFile().getName()));
+        } else {
+            mediaSource = buildMediaSource(getAudioUri());
         }
+        audioPlayer.prepare(mediaSource, true, true);
+        isPreparing = true;
+    }
+
+    private void setUpRecentFiles() {
+        String uri;
+        long size;
+        if (isFileAvailableOffline(getAudioFile())) {
+            uri = getUriFrom(getAudioFile().getName(), getAudioFile().getModificationTime());
+            size = new File(getOfflineFileUri(getAudioFile().getName()).toString()).length();
+        } else {
+            uri = getAudioUri().toString();
+            size = getAudioFile().getSize();
+        }
+
+        String serverName = Preferences.getServerName(this);
+
+        RecentFile recentFile = new RecentFile(audioFile.getUniqueKey(),
+            uri,
+            serverName,
+            System.currentTimeMillis(),
+            size);
+        RecentFileRepository recentFileRepository = new RecentFileRepository(this);
+        recentFileRepository.insert(recentFile);
+    }
+
+    private String getUriFrom(String name, Date modificationTime) {
+        OfflineFileRepository repository = new OfflineFileRepository(this);
+        OfflineFile offlineFile = repository.getOfflineFile(name, modificationTime.getTime());
+        return offlineFile.getFileUri();
+    }
+
+    private boolean isFileAvailableOffline(ServerFile serverFile) {
+        OfflineFileRepository repository = new OfflineFileRepository(this);
+        OfflineFile file = repository.getOfflineFile(serverFile.getName(), serverFile.getModificationTime().getTime());
+        return file != null && file.getState() == OfflineFile.DOWNLOADED;
+    }
+
+    private Uri getOfflineFileUri(String name) {
+        return Uri.parse(getFilesDir() + "/" + Downloader.OFFLINE_PATH + "/" + name);
     }
 
     private Uri getAudioUri() {
-        return serverClient.getFileUri(audioShare, audioFile);
+        if (audioShare != null) {
+            return serverClient.getFileUri(audioShare, getAudioFile());
+        } else {
+            return getRecentFileUri();
+        }
     }
 
-    @Override
-    public void onPrepared(MediaPlayer audioPlayer) {
-        if (audioMetadataFormatter == null) {
-            // Temporarily display empty audio metadata (to build notification)
-            BusProvider.getBus().post(new AudioMetadataRetrievedEvent(null, audioFile));
-        }
-        BusProvider.getBus().post(new AudioPreparedEvent());
-        playAudio();
+    private Uri getRecentFileUri() {
+        RecentFileRepository repository = new RecentFileRepository(this);
+        return Uri.parse(repository.getRecentFile(getAudioFile().getUniqueKey()).getUri());
     }
 
     private void setUpAudioMetadata() {
-        // Clear any previous metadata
-        tearDownAudioMetadataFormatter();
-        // Start fetching new metadata in the background
-        AudioMetadataRetrievingTask.execute(getAudioUri(), audioFile);
+        if (audioShare != null) {
+            // Clear any previous metadata
+            tearDownAudioMetadataFormatter();
+            // Start fetching new metadata in the background
+            AudioMetadataRetrievingTask
+                .newInstance(this, getAudioUri(), audioFile)
+                .execute();
+        }
     }
 
     @Subscribe
     public void onAudioMetadataRetrieved(AudioMetadataRetrievedEvent event) {
-        if (audioFile != null && audioFile == event.getServerFile()) {
+        if (audioFile != null && event.getServerFile() != null && audioFile.getUniqueKey().equals(event.getServerFile().getUniqueKey())) {
+            final AudioMetadata metadata = event.getAudioMetadata();
             this.audioMetadataFormatter = new AudioMetadataFormatter(
-                event.getAudioTitle(), event.getAudioArtist(), event.getAudioAlbum());
-            this.audioMetadataFormatter.setDuration(event.getDuration());
-            this.audioAlbumArt = event.getAudioAlbumArt();
-
+                metadata.getAudioTitle(), metadata.getAudioArtist(), metadata.getAudioAlbum());
+            this.audioMetadataFormatter.setDuration(metadata.getDuration());
+            this.audioAlbumArt = metadata.getAudioAlbumArt();
             setUpAudioPlayerRemote(audioMetadataFormatter, audioAlbumArt);
 
             mMediaNotificationManager.startNotification();
@@ -263,6 +338,12 @@ public class AudioService extends MediaBrowserServiceCompat implements
         return audioAlbumArt.copy(artworkConfig, false);
     }
 
+    public void setPlayPosition(long playPosition) {
+        getAudioPlayer().seekTo(playPosition);
+        playAudio();
+        BusProvider.getBus().post(new AudioPreparedEvent());
+    }
+
     public PendingIntent createContentIntent() {
         Intent audioIntent = Intents.Builder.with(this).buildServerFileIntent(audioShare, audioFiles, audioFile);
         return PendingIntent.getActivity(this, 0, audioIntent, PendingIntent.FLAG_CANCEL_CURRENT);
@@ -270,6 +351,14 @@ public class AudioService extends MediaBrowserServiceCompat implements
 
     public ServerFile getAudioFile() {
         return audioFile;
+    }
+
+    public ServerShare getAudioShare() {
+        return audioShare;
+    }
+
+    public List<ServerFile> getAudioFiles() {
+        return audioFiles;
     }
 
     public AudioMetadataFormatter getAudioMetadataFormatter() {
@@ -280,13 +369,13 @@ public class AudioService extends MediaBrowserServiceCompat implements
         return audioAlbumArt;
     }
 
-    public MediaPlayer getAudioPlayer() {
+    public ExoPlayer getAudioPlayer() {
         return audioPlayer;
     }
 
     @Subscribe
     public void onAudioControlPlayPause(AudioControlPlayPauseEvent event) {
-        if (audioPlayer.isPlaying()) {
+        if (audioPlayer.getPlayWhenReady()) {
             pauseAudio();
         } else {
             playAudio();
@@ -304,24 +393,69 @@ public class AudioService extends MediaBrowserServiceCompat implements
     }
 
     @Subscribe
+    public void onAudioControlChange(AudioControlChangeEvent event) {
+        startChangedAudio(event.getPosition());
+    }
+
+    @Subscribe
     public void onAudioControlNext(AudioControlNextEvent event) {
+        tearDownAudioPlayback();
         startNextAudio();
     }
 
     @Subscribe
     public void onAudioControlPrevious(AudioControlPreviousEvent event) {
+        tearDownAudioPlayback();
         startPreviousAudio();
+    }
+
+    private void startNextAudio() {
+        this.audioFile = getNextAudioFile();
+        setUpAudioPlayback();
+        playAudio();
+        setUpAudioMetadata();
+    }
+
+    private ServerFile getNextAudioFile() {
+        int audioPosition = audioFiles.indexOf(audioFile);
+
+        if (audioPosition == audioFiles.size() - 1) {
+            return audioFiles.get(0);
+        }
+        return audioFiles.get(audioPosition + 1);
+    }
+
+    private void startPreviousAudio() {
+        this.audioFile = getPreviousAudioFile();
+
+        setUpAudioPlayback();
+        playAudio();
+        setUpAudioMetadata();
+    }
+
+    private ServerFile getPreviousAudioFile() {
+        int audioPosition = audioFiles.indexOf(audioFile);
+
+        if (audioPosition == 0) {
+            audioPosition = audioFiles.size();
+        }
+        return audioFiles.get(audioPosition - 1);
+    }
+
+    @Subscribe
+    public void onAudioCompleted(AudioCompletedEvent event) {
+        startNextAudio();
     }
 
     public void playAudio() {
         mediaSession.setActive(true);
-        audioPlayer.start();
+        audioPlayer.setPlayWhenReady(true);
         setMediaPlaybackState(PlaybackStateCompat.STATE_PLAYING);
     }
 
     public void pauseAudio() {
         mediaSession.setActive(false);
-        audioPlayer.pause();
+        audioPlayer.setPlayWhenReady(false);
         setMediaPlaybackState(PlaybackStateCompat.STATE_PAUSED);
     }
 
@@ -336,56 +470,31 @@ public class AudioService extends MediaBrowserServiceCompat implements
         long actions = PlaybackStateCompat.ACTION_PLAY_PAUSE |
             PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS |
             PlaybackStateCompat.ACTION_SKIP_TO_NEXT;
-        if (audioPlayer.isPlaying()) {
-            actions |= PlaybackStateCompat.ACTION_PAUSE;
-        } else {
+        if (audioPlayer.getPlayWhenReady()) {
             actions |= PlaybackStateCompat.ACTION_PLAY;
+        } else {
+            actions |= PlaybackStateCompat.ACTION_PAUSE;
         }
         return actions;
-    }
-
-    private void startNextAudio() {
-        this.audioFile = getNextAudioFile();
-
-        tearDownAudioPlayback();
-
-        setUpAudioPlayback();
-        setUpAudioMetadata();
-    }
-
-    private ServerFile getNextAudioFile() {
-        int currentAudioFilePosition = audioFiles.indexOf(audioFile);
-
-        if (currentAudioFilePosition == audioFiles.size() - 1) {
-            return audioFiles.get(0);
-        }
-
-        return audioFiles.get(currentAudioFilePosition + 1);
     }
 
     private void tearDownAudioPlayback() {
         if (isAudioPlaying())
             pauseAudio();
-        audioPlayer.reset();
     }
 
-    private void startPreviousAudio() {
-        this.audioFile = getPreviousAudioFile();
+    private void startChangedAudio(int position) {
+        this.audioFile = getChangedAudioFile(position);
 
         tearDownAudioPlayback();
 
         setUpAudioPlayback();
+        playAudio();
         setUpAudioMetadata();
     }
 
-    private ServerFile getPreviousAudioFile() {
-        int currentAudioFilePosition = audioFiles.indexOf(audioFile);
-
-        if (currentAudioFilePosition == 0) {
-            return audioFiles.get(audioFiles.size() - 1);
-        }
-
-        return audioFiles.get(currentAudioFilePosition - 1);
+    private ServerFile getChangedAudioFile(int position) {
+        return audioFiles.get(position);
     }
 
     @Override
@@ -423,14 +532,14 @@ public class AudioService extends MediaBrowserServiceCompat implements
 
     private boolean isAudioPlaying() {
         try {
-            return isAudioStarted() && audioPlayer.isPlaying();
+            return isAudioStarted() && audioPlayer.getPlayWhenReady();
         } catch (IllegalStateException e) {
             return false;
         }
     }
 
     private void setUpAudioVolume() {
-        audioPlayer.setVolume(1.0f, 1.0f);
+        audioPlayer.setVolume(1.0f);
     }
 
     private void handleAudioFocusLoss() {
@@ -447,21 +556,7 @@ public class AudioService extends MediaBrowserServiceCompat implements
     }
 
     private void tearDownAudioVolume() {
-        audioPlayer.setVolume(0.3f, 0.3f);
-    }
-
-    @Override
-    public void onCompletion(MediaPlayer audioPlayer) {
-        BusProvider.getBus().post(new AudioCompletedEvent());
-        tearDownAudioMetadataFormatter();
-        startNextAudio();
-    }
-
-    @Override
-    public boolean onError(MediaPlayer audioPlayer, int errorReason, int errorExtra) {
-        getAudioPlayer().reset();
-        tearDownAudioMetadataFormatter();
-        return true;
+        audioPlayer.setVolume(0.3f);
     }
 
     @Override
@@ -484,19 +579,80 @@ public class AudioService extends MediaBrowserServiceCompat implements
     }
 
     private void tearDownAudioPlayer() {
-        audioPlayer.reset();
         audioPlayer.release();
     }
 
     private void tearDownAudioPlayerRemote() {
         AudioManager audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
 
-        audioManager.abandonAudioFocus(this);
+        if (audioManager != null) {
+            audioManager.abandonAudioFocus(this);
+        }
         mediaSession.release();
     }
 
     private void tearDownAudioPlayerNotification() {
         mMediaNotificationManager.stopNotification();
+    }
+
+    @Override
+    public void onTimelineChanged(Timeline timeline, Object manifest, int reason) {
+
+    }
+
+    @Override
+    public void onTracksChanged(TrackGroupArray trackGroups, TrackSelectionArray trackSelections) {
+
+    }
+
+    @Override
+    public void onLoadingChanged(boolean isLoading) {
+
+    }
+
+    @Override
+    public void onPlayerStateChanged(boolean playWhenReady, int playbackState) {
+        if (playbackState == Player.STATE_ENDED) {
+            BusProvider.getBus().post(new AudioCompletedEvent());
+        } else if (playbackState == Player.STATE_READY && isPreparing) {
+            isPreparing = false;
+            BusProvider.getBus().post(new AudioPreparedEvent());
+        }
+    }
+
+    @Override
+    public void onRepeatModeChanged(int repeatMode) {
+
+    }
+
+    @Override
+    public void onShuffleModeEnabledChanged(boolean shuffleModeEnabled) {
+
+    }
+
+    @Override
+    public void onPlayerError(ExoPlaybackException error) {
+        getAudioPlayer().stop();
+        tearDownAudioMetadataFormatter();
+    }
+
+    @Override
+    public void onPositionDiscontinuity(int reason) {
+
+    }
+
+    @Override
+    public void onPlaybackParametersChanged(PlaybackParameters playbackParameters) {
+
+    }
+
+    @Override
+    public void onSeekProcessed() {
+
+    }
+
+    public int getAudioPosition() {
+        return audioFiles.indexOf(audioFile);
     }
 
     private enum AudioFocus {
@@ -528,12 +684,12 @@ public class AudioService extends MediaBrowserServiceCompat implements
 
         @Override
         public void onSkipToNext() {
-            startNextAudio();
+            BusProvider.getBus().post(new AudioControlNextEvent());
         }
 
         @Override
         public void onSkipToPrevious() {
-            startPreviousAudio();
+            BusProvider.getBus().post(new AudioControlPreviousEvent());
         }
     }
 }

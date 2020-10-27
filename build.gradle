@@ -1,8 +1,8 @@
 buildscript {
     repositories {
-        jcenter()
         maven { url 'https://maven.fabric.io/public' }
         google()
+        jcenter()
     }
 
     dependencies {
@@ -15,7 +15,7 @@ apply plugin: "com.android.application"
 apply plugin: 'io.fabric'
 
 android {
-    compileSdkVersion 25
+    compileSdkVersion 28
     buildToolsVersion '27.0.1'
 
     signingConfigs {
@@ -36,7 +36,9 @@ android {
         }
     }
 
-
+    dexOptions {
+        jumboMode true
+    }
 
     defaultConfig {
         def versionMajor = 3
@@ -47,7 +49,7 @@ android {
         versionCode buildVersionCode(versionMajor, versionMinor, versionPatch)
 
         minSdkVersion 17
-        targetSdkVersion 25
+        targetSdkVersion 28
 
         def apiFile = file("api.properties")
         def apiProperties = new Properties()
@@ -85,6 +87,14 @@ android {
             abortOnError false
         }
     }
+    compileOptions {
+        targetCompatibility 1.8
+        sourceCompatibility 1.8
+    }
+}
+
+ext {
+    archRoomVersion = "1.1.0"
 }
 
 static def buildVersionName(versionMajor, versionMinor, versionPatch) {
@@ -101,50 +111,69 @@ static def formatStringField(field) {
 
 dependencies {
     repositories {
-        jcenter()
+        google()
         mavenCentral()
         mavenLocal()
         maven { url 'https://maven.fabric.io/public' }
         maven { url 'http://dl.bintray.com/megabitdragon/maven' }
         maven { url 'https://jitpack.io' }
-        google()
+        jcenter()
     }
-    def SUPPORT_LIBRARY_VERSION = "25.4.0"
-    compile "com.android.support:support-v4:${SUPPORT_LIBRARY_VERSION}"
-    compile "com.android.support:support-v13:${SUPPORT_LIBRARY_VERSION}"
-    compile "com.android.support:recyclerview-v7:${SUPPORT_LIBRARY_VERSION}"
-    compile "com.android.support:appcompat-v7:${SUPPORT_LIBRARY_VERSION}"
-    compile "com.android.support:design:${SUPPORT_LIBRARY_VERSION}"
-    compile "com.android.support:preference-v7:${SUPPORT_LIBRARY_VERSION}"
-    compile "com.android.support:customtabs:${SUPPORT_LIBRARY_VERSION}"
-    compile "com.android.support:leanback-v17:${SUPPORT_LIBRARY_VERSION}"
-    compile "com.android.support:mediarouter-v7:${SUPPORT_LIBRARY_VERSION}"
-    compile "com.android.support:cardview-v7:${SUPPORT_LIBRARY_VERSION}"
-    compile 'com.google.android.gms:play-services-cast-framework:11.6.0'
-    compile('com.crashlytics.sdk.android:crashlytics:2.6.6@aar') {
-        transitive = true;
+    def SUPPORT_LIBRARY_VERSION = "26.1.0"
+    implementation "com.android.support:support-v4:${SUPPORT_LIBRARY_VERSION}"
+    implementation "com.android.support:support-v13:${SUPPORT_LIBRARY_VERSION}"
+    implementation "com.android.support:appcompat-v7:${SUPPORT_LIBRARY_VERSION}"
+    implementation "com.android.support:design:${SUPPORT_LIBRARY_VERSION}"
+    implementation "com.android.support:preference-v7:${SUPPORT_LIBRARY_VERSION}"
+    implementation "com.android.support:customtabs:${SUPPORT_LIBRARY_VERSION}"
+    implementation "com.android.support:leanback-v17:${SUPPORT_LIBRARY_VERSION}"
+    implementation "com.android.support:mediarouter-v7:${SUPPORT_LIBRARY_VERSION}"
+    implementation "com.android.support:cardview-v7:${SUPPORT_LIBRARY_VERSION}"
+    implementation 'com.google.android.gms:play-services-cast-framework:11.6.0'
+    implementation('com.crashlytics.sdk.android:crashlytics:2.6.6@aar') {
+        transitive = true
     }
+    implementation 'com.amulyakhare:com.amulyakhare.textdrawable:1.0.1'
+    implementation 'com.github.dmytrodanylyk.android-process-button:library:1.0.4'
+    implementation 'com.jakewharton.timber:timber:4.5.1'
 
-    compile 'com.github.dmytrodanylyk.android-process-button:library:1.0.4'
-    compile 'com.jakewharton.timber:timber:4.5.1'
-    compile 'com.squareup.dagger:dagger:1.2.5'
+//    Otto and Retrofit
+    implementation 'com.squareup:otto:1.3.8'
+    implementation 'com.github.apl-devs:appintro:v4.2.0'
+    implementation 'com.github.bumptech.glide:glide:3.7.0'
+    implementation 'com.squareup.retrofit2:retrofit:2.3.0'
+    implementation 'com.squareup.retrofit2:converter-gson:2.3.0'
+    implementation 'com.squareup.okhttp3:logging-interceptor:3.8.0'
+
+
+    implementation 'org.videolan:libvlc:2.1.1'
+    implementation 'pub.devrel:easypermissions:0.4.2'
+    testImplementation 'org.robolectric:robolectric:3.1.2'
+    testImplementation 'junit:junit:4.12'
+    testImplementation 'org.robolectric:shadows-multidex:3.0'
+    androidTestImplementation 'com.android.support.test.espresso:espresso-core:3.0.1'
+    androidTestImplementation 'com.android.support.test:runner:1.0.1'
+    androidTestImplementation "com.android.support:support-annotations:${SUPPORT_LIBRARY_VERSION}"
+
+//    Dagger
+    implementation 'com.squareup.dagger:dagger:1.2.5'
+    compileOnly 'com.squareup.dagger:dagger-compiler:1.2.5'
     annotationProcessor 'com.squareup.dagger:dagger-compiler:1.2.5'
-    compile 'com.squareup:otto:1.3.8'
-    compile 'com.github.apl-devs:appintro:v4.2.0'
-    compile 'com.github.bumptech.glide:glide:3.7.0'
-    compile 'com.squareup.retrofit2:retrofit:2.3.0'
-    compile 'com.squareup.retrofit2:converter-gson:2.3.0'
-    compile 'com.squareup.okhttp3:logging-interceptor:3.8.0'
-    compile 'org.videolan:libvlc:2.1.1'
-    compile 'pub.devrel:easypermissions:0.4.2'
-    testCompile 'org.robolectric:robolectric:3.1.2'
-    testCompile 'junit:junit:4.12'
-    testCompile 'org.robolectric:shadows-multidex:3.0'
-    androidTestCompile 'com.android.support.test.espresso:espresso-core:3.0.1'
-    androidTestCompile 'com.android.support.test:runner:1.0.1'
-    androidTestCompile 'com.android.support:support-annotations:25.4.0'
-    provided 'com.squareup.dagger:dagger-compiler:1.2.5'
-    compile 'com.github.wseemann:FFmpegMediaMetadataRetriever:1.0.14'
+
+
+    implementation 'com.github.wseemann:FFmpegMediaMetadataRetriever:1.0.14'
+    implementation 'com.google.android.exoplayer:exoplayer-core:2.7.3'
+
+    implementation 'android.arch.persistence.room:runtime:' + rootProject.archRoomVersion
+    annotationProcessor 'android.arch.persistence.room:compiler:' + rootProject.archRoomVersion
+
+    // Uncomment the dependencies below to enable Chuck Interceptor for logging
+/*
+    debugImplementation 'com.readystatesoftware.chuck:library:1.1.0'
+    releaseImplementation 'com.readystatesoftware.chuck:library-no-op:1.1.0'
+    betaReleaseImplementation 'com.readystatesoftware.chuck:library-no-op:1.1.0'
+*/
+
 }
 
 task generateWrapper(type: Wrapper) {
@@ -159,10 +188,10 @@ android.applicationVariants.all { variant ->
     task("generate${variantName}Javadoc", type: Javadoc) {
         description "Generates ${variantName} documentation."
 
-        source = files(variant.javaCompile.source)
+        source = files(variant.javaCompiler.source)
 
         ext.androidClasspath = android.getBootClasspath().join(File.pathSeparator)
-        classpath = files(variant.javaCompile.classpath, ext.androidClasspath)
+        classpath = files(variant.javaCompiler.classpath, ext.androidClasspath)
 
         options {
             linksOffline "http://d.android.com/reference", "${android.sdkDirectory}/docs/reference"

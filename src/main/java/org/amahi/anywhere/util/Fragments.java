@@ -19,13 +19,18 @@
 
 package org.amahi.anywhere.util;
 
+import android.content.Context;
 import android.os.Bundle;
+import android.support.design.widget.BottomSheetDialogFragment;
 import android.support.v4.app.Fragment;
 import android.support.v4.app.FragmentManager;
 import android.support.v7.app.AppCompatActivity;
 
+import org.amahi.anywhere.fragment.AudioListFragment;
+import org.amahi.anywhere.fragment.FileOptionsDialogFragment;
 import org.amahi.anywhere.fragment.NavigationFragment;
 import org.amahi.anywhere.fragment.ServerAppsFragment;
+import org.amahi.anywhere.fragment.ServerFileAudioFragment;
 import org.amahi.anywhere.fragment.ServerFileImageFragment;
 import org.amahi.anywhere.fragment.ServerFilesFragment;
 import org.amahi.anywhere.fragment.ServerSharesFragment;
@@ -46,7 +51,11 @@ public final class Fragments {
 
     public static final class Arguments {
         public static final String SERVER_FILE = "server_file";
+        public static final String SERVER_FILES = "server_files";
         public static final String SERVER_SHARE = "server_share";
+        public static final String FILE_OPTION = "file_option";
+        public static final String IS_OFFLINE_FRAGMENT = "is_offline_fragment";
+        public static final String DIALOG_TYPE = "dialog_type";
 
         private Arguments() {
         }
@@ -80,8 +89,31 @@ public final class Fragments {
             return filesFragment;
         }
 
+        public static Fragment buildServerFilesFragmentForOfflineFiles() {
+            Fragment filesFragment = new ServerFilesFragment();
+
+            Bundle arguments = new Bundle();
+            arguments.putBoolean(Arguments.IS_OFFLINE_FRAGMENT, true);
+
+            filesFragment.setArguments(arguments);
+
+            return filesFragment;
+        }
+
         public static Fragment buildServerFileImageFragment(ServerShare share, ServerFile file) {
             Fragment fileFragment = new ServerFileImageFragment();
+
+            Bundle arguments = new Bundle();
+            arguments.putParcelable(Arguments.SERVER_SHARE, share);
+            arguments.putParcelable(Arguments.SERVER_FILE, file);
+
+            fileFragment.setArguments(arguments);
+
+            return fileFragment;
+        }
+
+        public static Fragment buildServerFileAudioFragment(ServerShare share, ServerFile file) {
+            Fragment fileFragment = new ServerFileAudioFragment();
 
             Bundle arguments = new Bundle();
             arguments.putParcelable(Arguments.SERVER_SHARE, share);
@@ -121,6 +153,36 @@ public final class Fragments {
             bundle.putParcelable(Intents.Extras.SERVER_FILE, serverFile);
             bundle.putParcelableArrayList(Intents.Extras.SERVER_FILES, serverFiles);
 
+            fragment.setArguments(bundle);
+            return fragment;
+        }
+
+        public static AudioListFragment buildAudioListFragment(ServerFile serverFile, ServerShare serverShare, ArrayList<ServerFile> serverFiles) {
+            AudioListFragment fragment = new AudioListFragment();
+
+            Bundle bundle = new Bundle();
+            bundle.putParcelable(Arguments.SERVER_SHARE, serverShare);
+            bundle.putParcelable(Arguments.SERVER_FILE, serverFile);
+            bundle.putParcelableArrayList(Arguments.SERVER_FILES, serverFiles);
+            fragment.setArguments(bundle);
+
+            return fragment;
+        }
+
+        public static BottomSheetDialogFragment buildFileOptionsDialogFragment(Context context, ServerFile file) {
+            BottomSheetDialogFragment fragment = new FileOptionsDialogFragment();
+
+            Bundle bundle = new Bundle();
+            bundle.putParcelable(Arguments.SERVER_FILE, file);
+            fragment.setArguments(bundle);
+            return fragment;
+        }
+
+        public static BottomSheetDialogFragment buildOfflineFileOptionsDialogFragment() {
+            BottomSheetDialogFragment fragment = new FileOptionsDialogFragment();
+
+            Bundle bundle = new Bundle();
+            bundle.putBoolean(Arguments.IS_OFFLINE_FRAGMENT, true);
             fragment.setArguments(bundle);
             return fragment;
         }

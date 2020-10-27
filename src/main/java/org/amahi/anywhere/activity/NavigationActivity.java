@@ -26,6 +26,7 @@ import android.support.v4.app.Fragment;
 import android.support.v4.widget.DrawerLayout;
 import android.support.v7.app.ActionBarDrawerToggle;
 import android.support.v7.app.AppCompatActivity;
+import android.support.v7.widget.Toolbar;
 import android.view.Gravity;
 import android.view.MenuItem;
 import android.view.View;
@@ -40,6 +41,8 @@ import org.amahi.anywhere.R;
 import org.amahi.anywhere.bus.AppSelectedEvent;
 import org.amahi.anywhere.bus.AppsSelectedEvent;
 import org.amahi.anywhere.bus.BusProvider;
+import org.amahi.anywhere.bus.OfflineFilesSelectedEvent;
+import org.amahi.anywhere.bus.RecentFilesSelectedEvent;
 import org.amahi.anywhere.bus.SettingsSelectedEvent;
 import org.amahi.anywhere.bus.ShareSelectedEvent;
 import org.amahi.anywhere.bus.SharesSelectedEvent;
@@ -108,12 +111,12 @@ public class NavigationActivity extends AppCompatActivity implements DrawerLayou
     }
 
     private void inflateStubs() {
-        ViewStub tvLoadingStub = (ViewStub) findViewById(R.id.view_stub_tv_loading);
+        ViewStub tvLoadingStub = findViewById(R.id.view_stub_tv_loading);
         tvLoadingStub.inflate();
     }
 
     private void hideMobileContainers() {
-        RelativeLayout tvLoading = (RelativeLayout) findViewById(R.id.tv_loading);
+        RelativeLayout tvLoading = findViewById(R.id.tv_loading);
 
         getContainerContent().setVisibility(View.INVISIBLE);
 
@@ -123,11 +126,11 @@ public class NavigationActivity extends AppCompatActivity implements DrawerLayou
     }
 
     private FrameLayout getContainerContent() {
-        return (FrameLayout) findViewById(R.id.container_content);
+        return findViewById(R.id.container_content);
     }
 
     private FrameLayout getContainerNavigation() {
-        return (FrameLayout) findViewById(R.id.container_navigation);
+        return findViewById(R.id.container_navigation);
     }
 
     private void displayTvLoading(RelativeLayout tvLoading) {
@@ -143,9 +146,10 @@ public class NavigationActivity extends AppCompatActivity implements DrawerLayou
     }
 
     private void setUpHomeNavigation() {
+        Toolbar toolbar = findViewById(R.id.toolbar);
+        setSupportActionBar(toolbar);
         getSupportActionBar().setHomeButtonEnabled(isNavigationDrawerAvailable());
         getSupportActionBar().setDisplayHomeAsUpEnabled(isNavigationDrawerAvailable());
-        getSupportActionBar().setIcon(R.drawable.ic_launcher);
     }
 
     private boolean isNavigationDrawerAvailable() {
@@ -178,7 +182,7 @@ public class NavigationActivity extends AppCompatActivity implements DrawerLayou
     }
 
     private DrawerLayout getDrawer() {
-        return (DrawerLayout) findViewById(R.id.drawer_content);
+        return findViewById(R.id.drawer_content);
     }
 
     @Override
@@ -303,6 +307,36 @@ public class NavigationActivity extends AppCompatActivity implements DrawerLayou
     }
 
     @Subscribe
+    public void onOfflineFilesSelected(OfflineFilesSelectedEvent event) {
+
+        showOfflineFiles();
+
+        if (isNavigationDrawerAvailable()) {
+            hideNavigationDrawer();
+        }
+    }
+
+    private void showOfflineFiles() {
+        Intent intent = Intents.Builder.with(this).buildServerFilesActivityForOfflineFiles();
+        startActivity(intent);
+    }
+
+    @Subscribe
+    public void onRecentFilesSelected(RecentFilesSelectedEvent event) {
+
+        showRecentFiles();
+
+        if (isNavigationDrawerAvailable()) {
+            hideNavigationDrawer();
+        }
+    }
+
+    private void showRecentFiles() {
+        Intent intent = Intents.Builder.with(this).buildRecentFilesActivity();
+        startActivity(intent);
+    }
+
+    @Subscribe
     public void onShareSelected(ShareSelectedEvent event) {
         setUpShare(event.getShare());
     }
@@ -392,6 +426,7 @@ public class NavigationActivity extends AppCompatActivity implements DrawerLayou
     private static final class State {
         public static final String NAVIGATION_TITLE = "navigation_title";
         public static final String NAVIGATION_DRAWER_VISIBLE = "navigation_drawer_visible";
+
         private State() {
         }
     }

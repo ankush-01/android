@@ -29,7 +29,9 @@ import org.amahi.anywhere.bus.NetworkChangedEvent;
 import org.amahi.anywhere.bus.ServerConnectedEvent;
 import org.amahi.anywhere.bus.ServerConnectionChangedEvent;
 import org.amahi.anywhere.bus.ServerConnectionDetectedEvent;
+import org.amahi.anywhere.bus.ServerConnectionFailedEvent;
 import org.amahi.anywhere.bus.ServerFileUploadCompleteEvent;
+import org.amahi.anywhere.bus.ServerRouteLoadFailedEvent;
 import org.amahi.anywhere.bus.ServerRouteLoadedEvent;
 import org.amahi.anywhere.server.Api;
 import org.amahi.anywhere.server.ApiAdapter;
@@ -154,7 +156,7 @@ public class ServerClient {
     }
 
     public boolean isConnected(Server server) {
-        return (this.server != null) && (this.server.getSession().equals(server.getSession()));
+        return (this.server != null) && (this.serverRoute != null) && (this.server.getSession().equals(server.getSession()));
     }
 
     public boolean isConnectedLocal() {
@@ -191,6 +193,16 @@ public class ServerClient {
         finishServerConnection();
     }
 
+    @Subscribe
+    public void onServerRouteLoadFailed(ServerRouteLoadFailedEvent event) {
+        this.serverRoute = null;
+        serverConnectionFailed(event.getErrorMessage());
+    }
+
+    private void serverConnectionFailed(String errorMessage) {
+        BusProvider.getBus().post(new ServerConnectionFailedEvent(errorMessage));
+    }
+
     private void finishServerConnection() {
         BusProvider.getBus().post(new ServerConnectedEvent(server));
     }
@@ -210,6 +222,7 @@ public class ServerClient {
         }
         this.serverAddress = serverRoute.getLocalAddress();
         this.serverApi = buildServerApi();
+        finishServerConnectionDetection();
     }
 
     public void connectRemote() {
@@ -219,6 +232,7 @@ public class ServerClient {
         }
         this.serverAddress = serverRoute.getRemoteAddress();
         this.serverApi = buildServerApi();
+        finishServerConnectionDetection();
     }
 
     public String getServerAddress() {
@@ -243,6 +257,11 @@ public class ServerClient {
 
     public void deleteFile(ServerShare share, ServerFile serverFile) {
         serverApi.deleteFile(server.getSession(), share.getName(), serverFile.getPath())
+            .enqueue(new ServerFileDeleteResponse());
+    }
+
+    public void deleteFile(String shareName, ServerFile serverFile) {
+        serverApi.deleteFile(server.getSession(), shareName, serverFile.getPath())
             .enqueue(new ServerFileDeleteResponse());
     }
 

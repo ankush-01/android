@@ -21,14 +21,15 @@ package org.amahi.anywhere.activity;
 
 import android.Manifest;
 import android.app.DialogFragment;
-import android.app.ProgressDialog;
-import android.content.DialogInterface;
+import android.content.ComponentName;
+import android.content.Context;
 import android.content.Intent;
-import android.database.Cursor;
+import android.content.ServiceConnection;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
+import android.os.IBinder;
 import android.provider.MediaStore;
 import android.support.annotation.NonNull;
 import android.support.annotation.RequiresApi;
@@ -41,29 +42,45 @@ import android.support.v7.app.AppCompatActivity;
 import android.view.MenuItem;
 import android.view.View;
 
+import com.google.android.gms.cast.framework.CastContext;
+import com.google.android.gms.cast.framework.CastState;
+import com.google.android.gms.cast.framework.CastStateListener;
 import com.squareup.otto.Subscribe;
 
 import org.amahi.anywhere.AmahiApplication;
 import org.amahi.anywhere.R;
+import org.amahi.anywhere.bus.AudioStopEvent;
 import org.amahi.anywhere.bus.BusProvider;
+import org.amahi.anywhere.bus.FileCopiedEvent;
 import org.amahi.anywhere.bus.FileDownloadedEvent;
 import org.amahi.anywhere.bus.FileOpeningEvent;
+import org.amahi.anywhere.bus.ServerFileDownloadingEvent;
 import org.amahi.anywhere.bus.ServerFileSharingEvent;
 import org.amahi.anywhere.bus.ServerFileUploadCompleteEvent;
 import org.amahi.anywhere.bus.ServerFileUploadProgressEvent;
 import org.amahi.anywhere.bus.UploadClickEvent;
+import org.amahi.anywhere.db.entities.OfflineFile;
+import org.amahi.anywhere.db.repositories.OfflineFileRepository;
+import org.amahi.anywhere.fragment.AudioControllerFragment;
 import org.amahi.anywhere.fragment.GooglePlaySearchFragment;
+import org.amahi.anywhere.fragment.PrepareDialogFragment;
+import org.amahi.anywhere.fragment.ProgressDialogFragment;
 import org.amahi.anywhere.fragment.ServerFileDownloadingFragment;
 import org.amahi.anywhere.fragment.ServerFilesFragment;
 import org.amahi.anywhere.fragment.UploadBottomSheet;
+import org.amahi.anywhere.model.FileOption;
 import org.amahi.anywhere.model.UploadOption;
 import org.amahi.anywhere.server.client.ServerClient;
 import org.amahi.anywhere.server.model.ServerFile;
 import org.amahi.anywhere.server.model.ServerShare;
+import org.amahi.anywhere.service.AudioService;
 import org.amahi.anywhere.util.Android;
+import org.amahi.anywhere.util.Downloader;
+import org.amahi.anywhere.util.FileManager;
 import org.amahi.anywhere.util.Fragments;
 import org.amahi.anywhere.util.Intents;
 import org.amahi.anywhere.util.Mimes;
+import org.amahi.anywhere.util.PathUtil;
 
 import java.io.File;
 import java.io.IOException;
@@ -81,7 +98,10 @@ import timber.log.Timber;
  * such as opening and sharing.
  * The files navigation itself is done via {@link org.amahi.anywhere.fragment.ServerFilesFragment}.
  */
-public class ServerFilesActivity extends AppCompatActivity implements EasyPermissions.PermissionCallbacks {
+public class ServerFilesActivity extends AppCompatActivity implements
+    EasyPermissions.PermissionCallbacks,
+    ServiceConnection,
+    CastStateListener {
 
     private static final int FILE_UPLOAD_PERMISSION = 102;
     private static final int CAMERA_PERMISSION = 103;
@@ -90,9 +110,15 @@ public class ServerFilesActivity extends AppCompatActivity implements EasyPermis
     @Inject
     ServerClient serverClient;
     private ServerFile file;
-    private FileAction fileAction;
-    private ProgressDialog uploadProgressDialog;
+    @FileOption.Types
+    private int fileOption;
+    private ProgressDialogFragment uploadDialogFragment;
     private File cameraImage;
+
+    private AudioService audioService;
+    private boolean isControllerShown = false;
+
+    private CastContext mCastContext;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -101,6 +127,8 @@ public class ServerFilesActivity extends AppCompatActivity implements EasyPermis
 
         setUpInjections();
 
+        setUpCast();
+
         setUpHomeNavigation();
 
         setUpFiles(savedInstanceState);
@@ -108,6 +136,10 @@ public class ServerFilesActivity extends AppCompatActivity implements EasyPermis
 
     private void setUpInjections() {
         AmahiApplication.from(this).inject(this);
+    }
+
+    private void setUpCast() {
+        mCastContext = CastContext.getSharedInstance(this);
     }
 
     private void setUpHomeNavigation() {
@@ -128,21 +160,15 @@ public class ServerFilesActivity extends AppCompatActivity implements EasyPermis
     }
 
     private void setUpUploadFAB() {
-        final FloatingActionButton fab = (FloatingActionButton) findViewById(R.id.fab_upload);
-        fab.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View view) {
-                new UploadBottomSheet().show(getSupportFragmentManager(), "upload_dialog");
-            }
-        });
+        final FloatingActionButton fab = findViewById(R.id.fab_upload);
+        fab.setOnClickListener(view -> new UploadBottomSheet().show(getSupportFragmentManager(), "upload_dialog"));
     }
 
     private void setUpUploadDialog() {
-        uploadProgressDialog = new ProgressDialog(this);
-        uploadProgressDialog.setTitle(getString(R.string.message_file_upload_title));
-        uploadProgressDialog.setCancelable(false);
-        uploadProgressDialog.setIndeterminate(false);
-        uploadProgressDialog.setProgressStyle(ProgressDialog.STYLE_HORIZONTAL);
+        uploadDialogFragment = (ProgressDialogFragment) getFragmentManager().findFragmentByTag("progress_dialog");
+        if (uploadDialogFragment == null) {
+            uploadDialogFragment = new ProgressDialogFragment();
+        }
     }
 
     @Override
@@ -166,7 +192,8 @@ public class ServerFilesActivity extends AppCompatActivity implements EasyPermis
     private void setUpFilesState(Bundle state) {
         if (isFilesStateValid(state)) {
             this.file = state.getParcelable(State.FILE);
-            this.fileAction = (FileAction) state.getSerializable(State.FILE_ACTION);
+            this.fileOption = state.getInt(State.FILE_ACTION);
+            this.isControllerShown = state.getBoolean(State.AUDIO_CONTROLLER);
         }
     }
 
@@ -177,7 +204,8 @@ public class ServerFilesActivity extends AppCompatActivity implements EasyPermis
     @Subscribe
     public void onFileOpening(FileOpeningEvent event) {
         this.file = event.getFile();
-        this.fileAction = FileAction.OPEN;
+        this.fileOption = FileOption.OPEN;
+        this.isControllerShown = false;
 
         setUpFile(event.getShare(), event.getFiles(), event.getFile());
     }
@@ -226,7 +254,7 @@ public class ServerFilesActivity extends AppCompatActivity implements EasyPermis
     }
 
     private void showFileDownloadingFragment(ServerShare share, ServerFile file) {
-        DialogFragment fragment = ServerFileDownloadingFragment.newInstance(share, file);
+        DialogFragment fragment = ServerFileDownloadingFragment.newInstance(share, file, fileOption);
         fragment.show(getFragmentManager(), ServerFileDownloadingFragment.TAG);
     }
 
@@ -236,18 +264,28 @@ public class ServerFilesActivity extends AppCompatActivity implements EasyPermis
     }
 
     private void finishFileDownloading(Uri fileUri) {
-        switch (fileAction) {
-            case OPEN:
+        switch (fileOption) {
+            case FileOption.OPEN:
                 startFileOpeningActivity(file, fileUri);
                 break;
 
-            case SHARE:
+            case FileOption.DOWNLOAD:
+                showFileDownloadedDialog(file, fileUri);
+                break;
+
+            case FileOption.SHARE:
                 startFileSharingActivity(file, fileUri);
                 break;
 
             default:
                 break;
         }
+    }
+
+    private void showFileDownloadedDialog(ServerFile file, Uri fileUri) {
+        Snackbar.make(getParentView(), R.string.message_file_download_complete, Snackbar.LENGTH_LONG)
+            .setAction(R.string.menu_open, view -> startFileOpeningActivity(file, fileUri))
+            .show();
     }
 
     private void startFileOpeningActivity(ServerFile file, Uri fileUri) {
@@ -297,12 +335,7 @@ public class ServerFilesActivity extends AppCompatActivity implements EasyPermis
 
     private void showPermissionSnackBar(String message) {
         Snackbar.make(getParentView(), message, Snackbar.LENGTH_LONG)
-            .setAction(R.string.menu_settings, new View.OnClickListener() {
-                @Override
-                public void onClick(View v) {
-                    new AppSettingsDialog.Builder(ServerFilesActivity.this).build().show();
-                }
-            })
+            .setAction(R.string.menu_settings, v -> new AppSettingsDialog.Builder(ServerFilesActivity.this).build().show())
             .show();
     }
 
@@ -385,7 +418,7 @@ public class ServerFilesActivity extends AppCompatActivity implements EasyPermis
                 case REQUEST_UPLOAD_IMAGE:
                     if (data != null) {
                         Uri selectedImageUri = data.getData();
-                        String filePath = querySelectedImagePath(selectedImageUri);
+                        String filePath = PathUtil.getPath(this, selectedImageUri);
                         if (filePath != null) {
                             File file = new File(filePath);
                             if (file.exists()) {
@@ -410,53 +443,32 @@ public class ServerFilesActivity extends AppCompatActivity implements EasyPermis
         }
     }
 
-    private String querySelectedImagePath(Uri selectedImageUri) {
-        String filePath = null;
-        if ("content".equals(selectedImageUri.getScheme())) {
-            String[] filePathColumn = {MediaStore.Images.Media.DATA};
-            Cursor cursor = this.getContentResolver()
-                .query(selectedImageUri, filePathColumn, null, null, null);
-            if (cursor != null) {
-                cursor.moveToFirst();
-                int columnIndex = cursor.getColumnIndex(filePathColumn[0]);
-                filePath = cursor.getString(columnIndex);
-                cursor.close();
-            }
-        } else {
-            filePath = selectedImageUri.toString();
-        }
-        return filePath;
-    }
-
     private void showDuplicateFileUploadDialog(final File file) {
         new AlertDialog.Builder(this)
             .setTitle(R.string.message_duplicate_file_upload)
             .setMessage(getString(R.string.message_duplicate_file_upload_body, file.getName()))
-            .setPositiveButton(R.string.button_yes, new DialogInterface.OnClickListener() {
-                @Override
-                public void onClick(DialogInterface dialog, int which) {
-                    uploadFile(file);
-                }
-            })
+            .setPositiveButton(R.string.button_yes, (dialog, which) -> uploadFile(file))
             .setNegativeButton(R.string.button_no, null)
             .show();
     }
 
     private void uploadFile(File uploadFile) {
         serverClient.uploadFile(0, uploadFile, getShare(), file);
-        uploadProgressDialog.show();
+        uploadDialogFragment.show(getFragmentManager(), "progress_dialog");
     }
 
     @Subscribe
     public void onFileUploadProgressEvent(ServerFileUploadProgressEvent fileUploadProgressEvent) {
-        if (uploadProgressDialog.isShowing()) {
-            uploadProgressDialog.setProgress(fileUploadProgressEvent.getProgress());
+        if (uploadDialogFragment.isAdded()) {
+            uploadDialogFragment.setProgress(fileUploadProgressEvent.getProgress());
         }
     }
 
     @Subscribe
     public void onFileUploadCompleteEvent(ServerFileUploadCompleteEvent event) {
-        uploadProgressDialog.dismiss();
+
+        if (uploadDialogFragment.isAdded())
+            uploadDialogFragment.dismiss();
         if (event.wasUploadSuccessful()) {
             Fragments.Operator.at(this).replace(buildFilesFragment(getShare(), file), R.id.container_files);
             Snackbar.make(getParentView(), R.string.message_file_upload_complete, Snackbar.LENGTH_LONG).show();
@@ -467,12 +479,7 @@ public class ServerFilesActivity extends AppCompatActivity implements EasyPermis
             Snackbar snackbar = Snackbar.make(getParentView(), R.string.message_file_upload_error, Snackbar.LENGTH_LONG);
             if (cameraImage != null && cameraImage.exists()) {
                 snackbar
-                    .setAction(R.string.button_retry, new View.OnClickListener() {
-                        @Override
-                        public void onClick(View v) {
-                            uploadFile(cameraImage);
-                        }
-                    })
+                    .setAction(R.string.button_retry, v -> uploadFile(cameraImage))
                     .addCallback(new Snackbar.Callback() {
                         @Override
                         public void onDismissed(Snackbar transientBottomBar, int event) {
@@ -494,15 +501,64 @@ public class ServerFilesActivity extends AppCompatActivity implements EasyPermis
     }
 
     @Subscribe
+    public void onFileDownloading(ServerFileDownloadingEvent event) {
+        this.file = event.getFile();
+        this.fileOption = FileOption.DOWNLOAD;
+
+        if (isFileAvailableOffline(event.getFile())) {
+            prepareDownloadingFile(file);
+        } else {
+            startFileDownloading(event.getShare(), file);
+        }
+    }
+
+    private void prepareDownloadingFile(ServerFile file) {
+        PrepareDialogFragment fragment = new PrepareDialogFragment();
+        fragment.show(getSupportFragmentManager(), "prepare_dialog");
+
+        File sourceLocation = new File(getFilesDir(), Downloader.OFFLINE_PATH + "/" + file.getName());
+        File downloadLocation = new File(Environment.getExternalStoragePublicDirectory(
+            Environment.DIRECTORY_DOWNLOADS),
+            file.getName());
+        FileManager.newInstance(this).copyFile(sourceLocation, downloadLocation);
+    }
+
+    @Subscribe
+    public void onFileCopied(FileCopiedEvent event) {
+        Uri contentUri = FileManager.newInstance(this).getContentUri(event.getTargetLocation());
+
+        dismissPreparingDialog();
+        BusProvider.getBus().post(new FileDownloadedEvent(contentUri));
+    }
+
+    private void dismissPreparingDialog() {
+        PrepareDialogFragment fragment = (PrepareDialogFragment) getSupportFragmentManager().findFragmentByTag("prepare_dialog");
+        if (fragment != null && fragment.isAdded()) {
+            fragment.dismiss();
+        }
+    }
+
+    @Subscribe
     public void onFileSharing(ServerFileSharingEvent event) {
         this.file = event.getFile();
-        this.fileAction = FileAction.SHARE;
+        this.fileOption = FileOption.SHARE;
 
         startFileSharingActivity(event.getShare(), event.getFile());
     }
 
     private void startFileSharingActivity(ServerShare share, ServerFile file) {
-        startFileDownloading(share, file);
+        if (isFileAvailableOffline(file)) {
+            Uri contenUri = FileManager.newInstance(this).getContentUriForOfflineFile(file.getName());
+            BusProvider.getBus().post(new FileDownloadedEvent(contenUri));
+        } else {
+            startFileDownloading(share, file);
+        }
+    }
+
+    private boolean isFileAvailableOffline(ServerFile serverFile) {
+        OfflineFileRepository repository = new OfflineFileRepository(this);
+        OfflineFile file = repository.getOfflineFile(serverFile.getName(), serverFile.getModificationTime().getTime());
+        return file != null && file.getState() == OfflineFile.DOWNLOADED;
     }
 
     @Override
@@ -521,14 +577,102 @@ public class ServerFilesActivity extends AppCompatActivity implements EasyPermis
     protected void onResume() {
         super.onResume();
 
+
+        mCastContext.addCastStateListener(this);
+
         BusProvider.getBus().register(this);
+
+        if (mCastContext.getCastState() != CastState.CONNECTED) {
+            setUpAudioServiceBind();
+        }
+    }
+
+    private void setUpAudioServiceBind() {
+        Intent intent = new Intent(this, AudioService.class);
+        bindService(intent, this, Context.BIND_AUTO_CREATE);
+    }
+
+    @Override
+    public void onServiceConnected(ComponentName name, IBinder service) {
+        setUpAudioServiceBind(service);
+        if (audioService.getAudioFile() != null && (audioService.getAudioPlayer().getPlayWhenReady() || isControllerShown)) {
+            showAudioControls();
+        } else {
+            hideAudioControls();
+            unbindService(this);
+            stopService(new Intent(this, AudioService.class));
+            audioService = null;
+        }
+    }
+
+    private void setUpAudioServiceBind(IBinder serviceBinder) {
+        AudioService.AudioServiceBinder audioServiceBinder = (AudioService.AudioServiceBinder) serviceBinder;
+        audioService = audioServiceBinder.getAudioService();
+    }
+
+    @Override
+    public void onServiceDisconnected(ComponentName name) {
+    }
+
+    private AudioControllerFragment getAudioController() {
+        return (AudioControllerFragment) getSupportFragmentManager().findFragmentById(R.id.audio_controller_fragment);
+    }
+
+    private void showAudioControls() {
+        getSupportFragmentManager().beginTransaction()
+            .show(getAudioController())
+            .commit();
+        isControllerShown = true;
+        getAudioController().connect(audioService);
+    }
+
+    private void hideAudioControls() {
+        isControllerShown = false;
+        getSupportFragmentManager().beginTransaction()
+            .hide(getAudioController())
+            .commit();
+    }
+
+    @Subscribe
+    public void onAudioStopping(AudioStopEvent event) {
+        hideAudioControls();
+        stopAudioPlayback();
+    }
+
+    private void stopAudioPlayback() {
+        if (audioService != null) {
+            audioService.pauseAudio();
+            unbindService(this);
+            stopService(new Intent(this, AudioService.class));
+            audioService = null;
+        }
     }
 
     @Override
     protected void onPause() {
         super.onPause();
 
+        mCastContext.removeCastStateListener(this);
+
+        if (audioService != null) {
+            unbindService(this);
+        }
+
         BusProvider.getBus().unregister(this);
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+
+        if (audioService != null && isFinishing()) {
+            tearDownAudioService();
+        }
+    }
+
+    private void tearDownAudioService() {
+        Intent intent = new Intent(this, AudioService.class);
+        stopService(intent);
     }
 
     @Override
@@ -540,17 +684,23 @@ public class ServerFilesActivity extends AppCompatActivity implements EasyPermis
 
     private void tearDownFilesState(Bundle state) {
         state.putParcelable(State.FILE, file);
-        state.putSerializable(State.FILE_ACTION, fileAction);
+        state.putInt(State.FILE_ACTION, fileOption);
+        state.putBoolean(State.AUDIO_CONTROLLER, isControllerShown);
     }
 
-    private enum FileAction {
-        OPEN, SHARE;
+    @Override
+    public void onCastStateChanged(int newState) {
+        if (newState != CastState.CONNECTED) {
+            hideAudioControls();
+            stopAudioPlayback();
+        }
     }
 
     private static final class State {
 
         public static final String FILE = "file";
         public static final String FILE_ACTION = "file_action";
+        public static final String AUDIO_CONTROLLER = "audio_controller";
 
         private State() {
         }

@@ -30,15 +30,25 @@ import com.squareup.otto.Subscribe;
 import org.amahi.anywhere.AmahiApplication;
 import org.amahi.anywhere.bus.BusProvider;
 import org.amahi.anywhere.bus.ServerFilesLoadedEvent;
+import org.amahi.anywhere.db.entities.OfflineFile;
+import org.amahi.anywhere.db.entities.PlayedFile;
+import org.amahi.anywhere.db.entities.RecentFile;
+import org.amahi.anywhere.db.repositories.OfflineFileRepository;
+import org.amahi.anywhere.db.repositories.PlayedFileRepository;
+import org.amahi.anywhere.db.repositories.RecentFileRepository;
 import org.amahi.anywhere.server.client.ServerClient;
 import org.amahi.anywhere.server.model.ServerFile;
 import org.amahi.anywhere.server.model.ServerShare;
+import org.amahi.anywhere.util.Downloader;
 import org.amahi.anywhere.util.Mimes;
+import org.amahi.anywhere.util.Preferences;
 import org.videolan.libvlc.LibVLC;
 import org.videolan.libvlc.Media;
 import org.videolan.libvlc.MediaPlayer;
 
+import java.io.File;
 import java.util.ArrayList;
+import java.util.Date;
 import java.util.List;
 
 import javax.inject.Inject;
@@ -51,6 +61,10 @@ public class VideoService extends Service {
     ServerClient serverClient;
     private ServerShare videoShare;
     private ServerFile videoFile;
+
+    private long pauseTime;
+    private long length;
+
     private LibVLC mLibVLC;
     private MediaPlayer mMediaPlayer = null;
 
@@ -82,7 +96,7 @@ public class VideoService extends Service {
     }
 
     public boolean isVideoStarted() {
-        return (videoShare != null) && (videoFile != null);
+        return (videoFile != null);
     }
 
     public void startVideo(ServerShare videoShare, ServerFile videoFile, boolean isSubtitleEnabled) {
@@ -93,21 +107,74 @@ public class VideoService extends Service {
     }
 
     private void setUpVideoPlayback(boolean isSubtitleEnabled) {
-        Media media = new Media(mLibVLC, getVideoUri());
+        setUpRecentFiles();
+
+        Media media;
+        if (isFileAvailableOffline(videoFile)) {
+            media = new Media(mLibVLC, getOfflineFileUri(videoFile.getName()));
+        } else {
+            media = new Media(mLibVLC, getVideoUri());
+        }
         mMediaPlayer.setMedia(media);
         media.release();
         if (isSubtitleEnabled) {
             searchSubtitleFile();
         }
-        mMediaPlayer.play();
+    }
+
+    private void setUpRecentFiles() {
+        String uri;
+        long size;
+        if (isFileAvailableOffline(videoFile)) {
+            uri = getUriFrom(videoFile.getName(), videoFile.getModificationTime());
+            size = new File(getOfflineFileUri(videoFile.getName())).length();
+        } else {
+            uri = getVideoUri().toString();
+            size = videoFile.getSize();
+        }
+
+        String serverName = Preferences.getServerName(this);
+
+        RecentFile recentFile = new RecentFile(videoFile.getUniqueKey(),
+            uri,
+            serverName,
+            System.currentTimeMillis(),
+            size);
+        RecentFileRepository recentFileRepository = new RecentFileRepository(this);
+        recentFileRepository.insert(recentFile);
+    }
+
+    private boolean isFileAvailableOffline(ServerFile serverFile) {
+        OfflineFileRepository repository = new OfflineFileRepository(this);
+        OfflineFile file = repository.getOfflineFile(serverFile.getName(), serverFile.getModificationTime().getTime());
+        return file != null && file.getState() == OfflineFile.DOWNLOADED;
+    }
+
+    private String getUriFrom(String name, Date modificationTime) {
+        OfflineFileRepository repository = new OfflineFileRepository(this);
+        OfflineFile offlineFile = repository.getOfflineFile(name, modificationTime.getTime());
+        return offlineFile.getFileUri();
+    }
+
+    private String getOfflineFileUri(String name) {
+        return (getFilesDir() + "/" + Downloader.OFFLINE_PATH + "/" + name);
     }
 
     private Uri getVideoUri() {
+        if (videoShare == null) {
+            return getRecentFileUri();
+        }
+
         return serverClient.getFileUri(videoShare, videoFile);
     }
 
+    private Uri getRecentFileUri() {
+        RecentFileRepository repository = new RecentFileRepository(this);
+        return Uri.parse(repository.getRecentFile(videoFile.getUniqueKey()).getUri());
+    }
+
     private void searchSubtitleFile() {
-        if (serverClient.isConnected()) {
+        if (videoShare != null && serverClient.isConnected()) {
             if (!isDirectoryAvailable()) {
                 serverClient.getFiles(videoShare);
             } else {
@@ -122,9 +189,15 @@ public class VideoService extends Service {
         for (ServerFile file : files) {
             if (videoFile.getNameOnly().equals(file.getNameOnly())) {
                 if (Mimes.match(file.getMime()) == Mimes.Type.SUBTITLE) {
+                    pauseVideo();
+                    Media media = new Media(mLibVLC, getVideoUri());
+                    mMediaPlayer.setMedia(media);
+                    media.release();
                     mMediaPlayer.getMedia().addSlave(
                         new Media.Slave(
                             Media.Slave.Type.Subtitle, 4, getSubtitleUri(file)));
+                    playVideo();
+                    mMediaPlayer.setTime(pauseTime);
                     break;
                 }
             }
@@ -157,16 +230,40 @@ public class VideoService extends Service {
 
     public void pauseVideo() {
         mMediaPlayer.pause();
+
+        updatePauseTime();
+    }
+
+    private void updatePauseTime() {
+        pauseTime = getMediaPlayer().getTime();
+        length = getMediaPlayer().getLength();
+    }
+
+    public ServerFile getVideoFile() {
+        return videoFile;
+    }
+
+    public ServerShare getVideoShare() {
+        return videoShare;
     }
 
     @Override
     public void onDestroy() {
         super.onDestroy();
 
+        savePlayPosition();
+
         tearDownVideoPlayback();
         BusProvider.getBus().unregister(this);
     }
 
+    private void savePlayPosition() {
+        if (pauseTime >= 1000 && (length - pauseTime) >= 1000) {
+            PlayedFileRepository repository = new PlayedFileRepository(this);
+            PlayedFile playedFile = new PlayedFile(getVideoFile().getUniqueKey(), pauseTime);
+            repository.insert(playedFile);
+        }
+    }
 
     private void tearDownVideoPlayback() {
         mMediaPlayer.stop();
@@ -174,6 +271,19 @@ public class VideoService extends Service {
         mLibVLC.release();
     }
 
+    public void enableSubtitles(boolean enable) {
+        if (enable) {
+            searchSubtitleFile();
+        } else {
+            Media media = mMediaPlayer.getMedia();
+            media.clearSlaves();
+            pauseVideo();
+            mMediaPlayer.setMedia(media);
+            media.release();
+            mMediaPlayer.play();
+            mMediaPlayer.setTime(pauseTime);
+        }
+    }
 
     public static final class VideoServiceBinder extends Binder {
         private final VideoService videoService;

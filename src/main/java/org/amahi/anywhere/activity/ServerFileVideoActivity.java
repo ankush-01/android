@@ -26,12 +26,15 @@ import android.content.Intent;
 import android.content.ServiceConnection;
 import android.content.res.Configuration;
 import android.graphics.PixelFormat;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
+import android.os.Parcelable;
 import android.support.v7.app.AppCompatActivity;
 import android.util.Log;
+import android.view.Menu;
 import android.view.MenuItem;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
@@ -43,11 +46,29 @@ import android.widget.MediaController;
 import android.widget.ProgressBar;
 import android.widget.Toast;
 
+import com.google.android.gms.cast.MediaInfo;
+import com.google.android.gms.cast.MediaMetadata;
+import com.google.android.gms.cast.framework.CastButtonFactory;
+import com.google.android.gms.cast.framework.CastContext;
+import com.google.android.gms.cast.framework.CastSession;
+import com.google.android.gms.cast.framework.SessionManagerListener;
+import com.google.android.gms.cast.framework.media.RemoteMediaClient;
+import com.squareup.otto.Subscribe;
+
 import org.amahi.anywhere.AmahiApplication;
 import org.amahi.anywhere.R;
+import org.amahi.anywhere.bus.BusProvider;
+import org.amahi.anywhere.bus.DialogButtonClickedEvent;
+import org.amahi.anywhere.db.entities.PlayedFile;
+import org.amahi.anywhere.db.entities.RecentFile;
+import org.amahi.anywhere.db.repositories.PlayedFileRepository;
+import org.amahi.anywhere.db.repositories.RecentFileRepository;
+import org.amahi.anywhere.fragment.ResumeDialogFragment;
+import org.amahi.anywhere.server.client.ServerClient;
 import org.amahi.anywhere.server.model.ServerFile;
 import org.amahi.anywhere.server.model.ServerShare;
 import org.amahi.anywhere.service.VideoService;
+import org.amahi.anywhere.util.FileManager;
 import org.amahi.anywhere.util.FullScreenHelper;
 import org.amahi.anywhere.util.Intents;
 import org.amahi.anywhere.util.VideoSwipeGestures;
@@ -55,6 +76,11 @@ import org.amahi.anywhere.view.MediaControls;
 import org.videolan.libvlc.IVLCVout;
 import org.videolan.libvlc.Media;
 import org.videolan.libvlc.MediaPlayer;
+
+import java.util.ArrayList;
+import java.util.List;
+
+import javax.inject.Inject;
 
 /**
  * Video activity. Shows videos, supports basic operations such as pausing, resuming, scrolling.
@@ -65,16 +91,20 @@ public class ServerFileVideoActivity extends AppCompatActivity implements
     ServiceConnection,
     MediaController.MediaPlayerControl,
     IVLCVout.OnNewVideoLayoutListener,
-    MediaPlayer.EventListener,
     View.OnLayoutChangeListener,
-    VideoSwipeGestures.SeekControl {
+    VideoSwipeGestures.SeekControl,
+    SessionManagerListener<CastSession> {
 
-    private static final boolean ENABLE_SUBTITLES = false;
+    private boolean isSubtitlesEnable = false;
     private static SurfaceSizes CURRENT_SIZE = SurfaceSizes.SURFACE_BEST_FIT;
+    @Inject
+    ServerClient serverClient;
     private VideoService videoService;
     private MediaControls videoControls;
     private FullScreenHelper fullScreen;
     private Handler layoutChangeHandler;
+    private CastContext mCastContext;
+    private CastSession mCastSession;
     private int mVideoHeight = 0;
     private int mVideoWidth = 0;
     private int mVideoVisibleHeight = 0;
@@ -82,12 +112,7 @@ public class ServerFileVideoActivity extends AppCompatActivity implements
     private int mVideoSarNum = 0;
     private int mVideoSarDen = 0;
     private SurfaceView mSubtitlesSurface = null;
-    private final Runnable mRunnable = new Runnable() {
-        @Override
-        public void run() {
-            updateVideoSurfaces();
-        }
-    };
+    private final Runnable mRunnable = this::updateVideoSurfaces;
     private float bufferPercent = 0.0f;
 
     //TODO Add feature for changing the screen size
@@ -107,15 +132,20 @@ public class ServerFileVideoActivity extends AppCompatActivity implements
 
         setUpHomeNavigation();
 
-        setUpViews();
+        setUpCast();
+
+        prepareFiles();
+
+        setUpVideoTitle();
 
         setUpVideo();
 
-        setUpFullScreen();
+        loadState(savedInstanceState);
+    }
 
-        setUpGestureListener();
-
-        setUpVideoService();
+    private void loadState(Bundle state) {
+        if (state != null)
+            isSubtitlesEnable = state.getBoolean(State.SUBTITLES_ENABLED, false);
     }
 
     private void setUpInjections() {
@@ -127,15 +157,45 @@ public class ServerFileVideoActivity extends AppCompatActivity implements
         getSupportActionBar().setIcon(R.drawable.ic_launcher);
     }
 
-    private void setUpViews() {
-        final ViewStub stub = (ViewStub) findViewById(R.id.subtitles_stub);
-        mSubtitlesSurface = (SurfaceView) stub.inflate();
-        mSubtitlesSurface.setZOrderMediaOverlay(true);
-        mSubtitlesSurface.getHolder().setFormat(PixelFormat.TRANSLUCENT);
+    private void setUpCast() {
+        mCastContext = CastContext.getSharedInstance(this);
+        mCastSession = mCastContext.getSessionManager().getCurrentCastSession();
+    }
+
+    private void prepareFiles() {
+        int fileType = getIntent().getIntExtra(Intents.Extras.FILE_TYPE, FileManager.SERVER_FILE);
+        if (fileType == FileManager.RECENT_FILE) {
+            RecentFileRepository repository = new RecentFileRepository(this);
+            RecentFile recentFile = repository.getRecentFile(getIntent().getStringExtra(Intents.Extras.UNIQUE_KEY));
+            ServerFile serverFile = new ServerFile(recentFile.getName(), recentFile.getModificationTime(), recentFile.getMime());
+            serverFile.setSize(recentFile.getSize());
+            serverFile.setMime(recentFile.getMime());
+            getIntent().putExtra(Intents.Extras.SERVER_FILE, serverFile);
+            List<ServerFile> serverFiles = new ArrayList<>();
+            serverFiles.add(serverFile);
+            getIntent().putExtra(Intents.Extras.SERVER_FILES, new ArrayList<Parcelable>(serverFiles));
+        }
     }
 
     private void setUpVideo() {
-        setUpVideoTitle();
+        if (mCastSession != null && mCastSession.isConnected()) {
+            loadRemoteMedia(0, true);
+        } else {
+            setUpViews();
+
+            setUpFullScreen();
+
+            setUpGestureListener();
+
+            setUpVideoService();
+        }
+    }
+
+    private void setUpViews() {
+        final ViewStub stub = findViewById(R.id.subtitles_stub);
+        mSubtitlesSurface = (SurfaceView) stub.inflate();
+        mSubtitlesSurface.setZOrderMediaOverlay(true);
+        mSubtitlesSurface.getHolder().setFormat(PixelFormat.TRANSLUCENT);
     }
 
     private void setUpVideoTitle() {
@@ -149,18 +209,15 @@ public class ServerFileVideoActivity extends AppCompatActivity implements
     private void setUpFullScreen() {
         fullScreen = new FullScreenHelper(getSupportActionBar(), getVideoMainFrame());
         fullScreen.enableOnClickToggle(false);
-        getVideoMainFrame().setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View view) {
-                fullScreen.toggle();
-                videoControls.toggle();
-            }
+        getVideoMainFrame().setOnClickListener(view -> {
+            fullScreen.toggle();
+            videoControls.toggle();
         });
         fullScreen.init();
     }
 
     private FrameLayout getSwipeContainer() {
-        return (FrameLayout) findViewById(R.id.swipe_controls_frame);
+        return findViewById(R.id.swipe_controls_frame);
     }
 
     private void setUpGestureListener() {
@@ -217,19 +274,19 @@ public class ServerFileVideoActivity extends AppCompatActivity implements
         if (mSubtitlesSurface != null)
             vlcVout.setSubtitlesView(mSubtitlesSurface);
         vlcVout.attachViews(this);
-        getMediaPlayer().setEventListener(this);
+        getMediaPlayer().setEventListener(this::onEvent);
     }
 
     private SurfaceView getSurface() {
-        return (SurfaceView) findViewById(R.id.surface);
+        return findViewById(R.id.surface);
     }
 
     private FrameLayout getSurfaceFrame() {
-        return (FrameLayout) findViewById(R.id.video_surface_frame);
+        return findViewById(R.id.video_surface_frame);
     }
 
     private FrameLayout getVideoMainFrame() {
-        return (FrameLayout) findViewById(R.id.video_main_frame);
+        return findViewById(R.id.video_main_frame);
     }
 
     private void setUpVideoControls() {
@@ -265,8 +322,9 @@ public class ServerFileVideoActivity extends AppCompatActivity implements
             getVideoMainFrame().setVisibility(View.VISIBLE);
             getProgressBar().setVisibility(View.INVISIBLE);
         } else {
-            videoService.startVideo(getVideoShare(), getVideoFile(), ENABLE_SUBTITLES);
+            videoService.startVideo(getVideoShare(), getVideoFile(), false);
             addLayoutChangeListener();
+            setUpPlayPosition();
         }
     }
 
@@ -278,8 +336,44 @@ public class ServerFileVideoActivity extends AppCompatActivity implements
         }
     }
 
+    private void setUpPlayPosition() {
+        long lastPlayedPosition = getLastPlayedPosition(getVideoFile());
+
+        if (lastPlayedPosition != 0) {
+            new ResumeDialogFragment().show(getSupportFragmentManager(), "resume_dialog");
+        } else {
+            getMediaPlayer().setTime(0);
+            getMediaPlayer().play();
+        }
+    }
+
+    private long getLastPlayedPosition(ServerFile serverFile) {
+        PlayedFileRepository repository = new PlayedFileRepository(this);
+        PlayedFile playedFile = repository.getPlayedFile(serverFile.getUniqueKey());
+        if (playedFile != null) {
+            return playedFile.getPosition();
+        }
+        return 0;
+    }
+
+    @Subscribe
+    public void onDialogButtonClicked(DialogButtonClickedEvent event) {
+        getMediaPlayer().play();
+        if (event.getButtonId() == DialogButtonClickedEvent.YES) {
+            getMediaPlayer().setTime(getLastPlayedPosition(getVideoFile()));
+        } else {
+            deletePlayedFileFromDatabase(getVideoFile());
+            getMediaPlayer().setTime(0);
+        }
+    }
+
+    private void deletePlayedFileFromDatabase(ServerFile serverFile) {
+        PlayedFileRepository repository = new PlayedFileRepository(this);
+        repository.delete(serverFile.getUniqueKey());
+    }
+
     private ProgressBar getProgressBar() {
-        return (ProgressBar) findViewById(android.R.id.progress);
+        return findViewById(android.R.id.progress);
     }
 
     private ServerShare getVideoShare() {
@@ -528,7 +622,6 @@ public class ServerFileVideoActivity extends AppCompatActivity implements
         return 0;
     }
 
-    @Override
     public void onEvent(MediaPlayer.Event event) {
 
         switch (event.type) {
@@ -543,6 +636,7 @@ public class ServerFileVideoActivity extends AppCompatActivity implements
                 showThenAutoHideControls();
                 break;
             case MediaPlayer.Event.EndReached:
+                deletePlayedFileFromDatabase(getVideoFile());
                 finish();
                 break;
             case MediaPlayer.Event.Buffering:
@@ -556,10 +650,23 @@ public class ServerFileVideoActivity extends AppCompatActivity implements
     }
 
     @Override
+    public boolean onCreateOptionsMenu(Menu menu) {
+        getMenuInflater().inflate(R.menu.action_bar_video_files, menu);
+        CastButtonFactory.setUpMediaRouteButton(getApplicationContext(), menu,
+            R.id.media_route_menu_item);
+        menu.findItem(R.id.menu_subtitle).setChecked(isSubtitlesEnable);
+        return true;
+    }
+
+    @Override
     public boolean onOptionsItemSelected(MenuItem menuItem) {
         switch (menuItem.getItemId()) {
             case android.R.id.home:
                 finish();
+                return true;
+            case R.id.menu_subtitle:
+                menuItem.setChecked(!menuItem.isChecked());
+                enableSubtitles(menuItem.isChecked());
                 return true;
 
             default:
@@ -567,11 +674,28 @@ public class ServerFileVideoActivity extends AppCompatActivity implements
         }
     }
 
+    private void enableSubtitles(boolean enable) {
+        videoService.enableSubtitles(enable);
+        isSubtitlesEnable = enable;
+    }
+
+    @Override
+    protected void onResume() {
+        mCastContext.getSessionManager().addSessionManagerListener(this, CastSession.class);
+        super.onResume();
+
+        BusProvider.getBus().register(this);
+    }
+
     @Override
     public void onPause() {
         super.onPause();
 
-        videoControls.hide();
+        mCastContext.getSessionManager().removeSessionManagerListener(this, CastSession.class);
+
+        if (videoControls != null && videoControls.isShowing()) {
+            videoControls.hide();
+        }
 
         if (!isChangingConfigurations()) {
             pause();
@@ -580,6 +704,8 @@ public class ServerFileVideoActivity extends AppCompatActivity implements
         if (isFinishing()) {
             tearDownVideoPlayback();
         }
+
+        BusProvider.getBus().unregister(this);
     }
 
     private void tearDownVideoPlayback() {
@@ -611,6 +737,127 @@ public class ServerFileVideoActivity extends AppCompatActivity implements
         stopService(intent);
     }
 
+    @Override
+    public void onSessionEnded(CastSession session, int error) {
+    }
+
+    @Override
+    public void onSessionResumed(CastSession session, boolean wasSuspended) {
+        onApplicationConnected(session);
+    }
+
+    @Override
+    public void onSessionResumeFailed(CastSession session, int error) {
+    }
+
+    @Override
+    public void onSessionStarted(CastSession session, String sessionId) {
+        onApplicationConnected(session);
+    }
+
+    @Override
+    public void onSessionStartFailed(CastSession session, int error) {
+    }
+
+    @Override
+    public void onSessionStarting(CastSession session) {
+    }
+
+    @Override
+    public void onSessionEnding(CastSession session) {
+    }
+
+    @Override
+    public void onSessionResuming(CastSession session, String sessionId) {
+    }
+
+    @Override
+    public void onSessionSuspended(CastSession session, int reason) {
+    }
+
+    private void onApplicationConnected(CastSession castSession) {
+        mCastSession = castSession;
+        boolean isVideoPlaying = videoService.getMediaPlayer().isPlaying();
+        if (isVideoPlaying)
+            pause();
+        loadRemoteMedia(getCurrentPosition(), isVideoPlaying);
+    }
+
+    private void loadRemoteMedia(int position, boolean autoPlay) {
+        if (mCastSession == null) {
+            return;
+        }
+        final RemoteMediaClient remoteMediaClient = mCastSession.getRemoteMediaClient();
+        if (remoteMediaClient == null) {
+            return;
+        }
+        remoteMediaClient.addListener(new RemoteMediaClient.Listener() {
+            @Override
+            public void onStatusUpdated() {
+                Intent intent = new Intent(ServerFileVideoActivity.this, ExpandedControlsActivity.class);
+                startActivity(intent);
+                remoteMediaClient.removeListener(this);
+                finish();
+            }
+
+            @Override
+            public void onMetadataUpdated() {
+            }
+
+            @Override
+            public void onQueueStatusUpdated() {
+            }
+
+            @Override
+            public void onPreloadStatusUpdated() {
+            }
+
+            @Override
+            public void onSendingRemoteMediaRequest() {
+            }
+
+            @Override
+            public void onAdBreakStatusUpdated() {
+            }
+        });
+        remoteMediaClient.load(buildMediaInfo(), autoPlay, position);
+    }
+
+    private Uri getVideoUri() {
+        int fileType = getIntent().getIntExtra(Intents.Extras.FILE_TYPE, FileManager.SERVER_FILE);
+
+        if (fileType == FileManager.RECENT_FILE) {
+            return getRecentFileUri();
+        }
+
+        return serverClient.getFileUri(getVideoShare(), getVideoFile());
+    }
+
+    private Uri getRecentFileUri() {
+        RecentFileRepository repository = new RecentFileRepository(this);
+        return Uri.parse(repository.getRecentFile(getVideoFile().getUniqueKey()).getUri());
+    }
+
+    private MediaInfo buildMediaInfo() {
+        MediaMetadata movieMetadata = new MediaMetadata(MediaMetadata.MEDIA_TYPE_MOVIE);
+        movieMetadata.putString(MediaMetadata.KEY_TITLE, getVideoFile().getNameOnly());
+        MediaInfo.Builder builder = new MediaInfo.Builder(getVideoUri().toString())
+            .setStreamType(MediaInfo.STREAM_TYPE_BUFFERED)
+            .setContentType(getVideoFile().getMime())
+            .setMetadata(movieMetadata);
+        if (videoService != null && videoService.getMediaPlayer() != null) {
+            builder.setStreamDuration(videoService.getMediaPlayer().getLength());
+        }
+        return builder.build();
+    }
+
+    @Override
+    protected void onSaveInstanceState(Bundle outState) {
+        super.onSaveInstanceState(outState);
+
+        outState.putBoolean(State.SUBTITLES_ENABLED, isSubtitlesEnable);
+    }
+
     private enum SurfaceSizes {
         SURFACE_BEST_FIT,
         SURFACE_FIT_SCREEN,
@@ -618,5 +865,9 @@ public class ServerFileVideoActivity extends AppCompatActivity implements
         SURFACE_16_9,
         SURFACE_4_3,
         SURFACE_ORIGINAL;
+    }
+
+    private static final class State {
+        public static final String SUBTITLES_ENABLED = "subtitles_enabled";
     }
 }
